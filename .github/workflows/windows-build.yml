@@ -31,7 +31,7 @@ jobs:
         mkdir build -force
 
     - name: vcpkg depend-info --x-manifest-pid=vcpkg.json
-      run: vcpkg depend-info --x-manifest-pid=vcpkg.json
+      run: vcpkg depend-info cairo:x64-windows
 
     - name: Run vcpkg (Installs & Caches Dependencies)
       uses: lukka/run-vcpkg@v11
