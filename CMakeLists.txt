@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 1. Look up native vcpkg configurations directly (removes PkgConfig rules)
-find_package(unofficial-cairo CONFIG REQUIRED)
+find_package(cairo CONFIG REQUIRED)
 find_package(unofficial-librsvg CONFIG REQUIRED)
 find_package(Fontconfig CONFIG REQUIRED)
 
@@ -18,7 +18,7 @@ add_executable(publisher_convert main.cpp)
 
 # 3. Explicitly bind compiled library targets directly 
 target_link_libraries(publisher_convert PRIVATE 
-    unofficial::cairo::cairo
+    cairo::cairo
     unofficial::librsvg::librsvg
     Fontconfig::Fontconfig
     ${WOFF2_DEC_LIB}
