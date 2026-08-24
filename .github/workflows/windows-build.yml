@@ -46,6 +46,7 @@ jobs:
         choco install pkgconfiglite gperf
       shell: powershell
 
+        
     - name: mkdir build/
       run: |
         cd ${{ github.workspace }}
@@ -57,6 +58,11 @@ jobs:
         vcpkg install --triplet x64-windows
       shell: cmd
 
+    - name: Debug vcpkg / cairo
+      run: |
+        vcpkg root
+        vcpkg file cairo
+        
     - name: Configure CMake
       if: ${{ inputs.vcpkg_refresh_only == false }}
       run: |
