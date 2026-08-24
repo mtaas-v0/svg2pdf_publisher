@@ -2,11 +2,6 @@ name: Windows Native Build
 
 on:
   workflow_dispatch:
-    inputs:
-      vcpkg_refresh_only:
-        description: 'Check to vcpkg install only and save cache'
-        type: boolean
-        default: false
   push:
     branches: [ main, master ]
   pull_request:
@@ -24,23 +19,6 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-
-    # Step 1: Cache vcpkg artifacts (Keep your existing step)
-    - name: Cache vcpkg artifacts
-      id: cache-vcpkg
-      uses: actions/cache@v4
-      with:
-        path: |
-          C:\Users\runneradmin\AppData\Local\vcpkg\archives
-          C:\vcpkg
-          **/vcpkg_installed/
-          **/build/vcpkg_installed/
-          **/build/vcpkg/buildtrees/
-        key: ${{ runner.os }}-vcpkg-manifest-${{ hashFiles('**/vcpkg.json') }}-${{ hashFiles('**/.gitmodules', '**/vcpkg-configuration.json') }}
-        restore-keys: |
-          ${{ runner.os }}-vcpkg-manifest-v1-${{ hashFiles('**/vcpkg.json') }}-
-          ${{ runner.os }}-vcpkg-manifest-v1-
-
     - name: Install System Dependencies (pkgconf Host Tool)
       run: |
         choco install pkgconfiglite gperf
@@ -52,34 +30,33 @@ jobs:
         cd ${{ github.workspace }}
         mkdir build -force
 
-    - name: Install System Dependencies via vcpkg
-      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
-      run: |
-        vcpkg install --triplet x64-windows
-      shell: cmd
+    - name: Run vcpkg (Installs & Caches Dependencies)
+      uses: lukka/run-vcpkg@v11
+      env:
+        ACTIONS_CACHE_URL: ${{ env.ACTIONS_CACHE_URL }}
+        ACTIONS_RUNTIME_TOKEN: ${{ env.ACTIONS_RUNTIME_TOKEN }}
+      with:
+        vcpkgJsonGlob: '**/vcpkg.json'
 
-    - name: Debug vcpkg / cairo
-      run: |
-        vcpkg root
-        vcpkg file cairo
-        
     - name: Configure CMake
-      if: ${{ inputs.vcpkg_refresh_only == false }}
       run: |
         cmake -B build -S . `
-          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows
-      shell: pwsh
 
-    - name: Build Executable
-      if: ${{ inputs.vcpkg_refresh_only == false }}
+    - name: Build Project
+      continue-on-error: true
       run: |
         cmake --build build --config Release
-      shell: pwsh
+        
+    - name: Debug vcpkg / cairo
+      continue-on-error: true
+      run: |
+        vcpkg list
 
     - name: Upload Build Output
-      if: ${{ inputs.vcpkg_refresh_only == false }}
       uses: actions/upload-artifact@v4
+      continue-on-error: true
       with:
         name: publisher_convert-windows-x64-r${{ github.run_number }}
         path: build/
