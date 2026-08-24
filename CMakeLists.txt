@@ -4,31 +4,25 @@ project(svg2pdf_publisher VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(PkgConfig REQUIRED)
+# 1. Look up native vcpkg configurations directly (removes PkgConfig rules)
+find_package(unofficial-cairo CONFIG REQUIRED)
+find_package(unofficial-librsvg CONFIG REQUIRED)
+find_package(Fontconfig CONFIG REQUIRED)
 
-# Pulls strictly cross-compiled paths via updated toolchain configuration mappings
-pkg_check_modules(CAIRO REQUIRED cairo)
-pkg_check_modules(RSVG REQUIRED librsvg-2.0)
-pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
-
+# 2. Map standard static file searches for your WOFF2 decompression library
 find_library(WOFF2_DEC_LIB NAMES woff2dec)
 find_library(WOFF2_COMMON_LIB NAMES woff2common)
 find_path(WOFF2_INCLUDE_DIR NAMES woff2/decode.h)
 
 add_executable(publisher_convert main.cpp)
 
-target_include_directories(publisher_convert PRIVATE 
-    ${CAIRO_INCLUDE_DIRS} 
-    ${RSVG_INCLUDE_DIRS} 
-    ${FONTCONFIG_INCLUDE_DIRS}
-    ${WOFF2_INCLUDE_DIR}
-)
-
-# Strips host paths out of the system linker targets
+# 3. Explicitly bind compiled library targets directly 
 target_link_libraries(publisher_convert PRIVATE 
-    ${CAIRO_LIBRARIES} 
-    ${RSVG_LIBRARIES} 
-    ${FONTCONFIG_LIBRARIES}
+    unofficial::cairo::cairo
+    unofficial::librsvg::librsvg
+    Fontconfig::Fontconfig
     ${WOFF2_DEC_LIB}
     ${WOFF2_COMMON_LIB}
 )
+
+target_include_directories(publisher_convert PRIVATE ${WOFF2_INCLUDE_DIR})
