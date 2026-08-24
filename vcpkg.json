@@ -1,7 +1,7 @@
 {
   "name": "svg2pdf-publisher",
   "version-string": "1.0.0",
-  "builtin-baseline": "3496bc4eb5e7b14068305c6dfbe50fa392476af4",
+  "builtin-baseline": "0ac8df3b98e3afcd8bf075fa74a6bd2c32613345",
   "dependencies": [
     "cairo",
     "librsvg",
