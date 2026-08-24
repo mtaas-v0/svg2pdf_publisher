@@ -31,13 +31,15 @@ jobs:
       uses: actions/cache@v4
       with:
         path: |
+          C:\Users\runneradmin\AppData\Local\vcpkg\archives
+          C:\vcpkg
           **/vcpkg_installed/
           **/build/vcpkg_installed/
           **/build/vcpkg/buildtrees/
         key: ${{ runner.os }}-vcpkg-manifest-${{ hashFiles('**/vcpkg.json') }}-${{ hashFiles('**/.gitmodules', '**/vcpkg-configuration.json') }}
         restore-keys: |
-          ${{ runner.os }}-vcpkg-manifest-${{ hashFiles('**/vcpkg.json') }}-
-          ${{ runner.os }}-vcpkg-manifest-
+          ${{ runner.os }}-vcpkg-manifest-v1-${{ hashFiles('**/vcpkg.json') }}-
+          ${{ runner.os }}-vcpkg-manifest-v1-
 
     - name: Install System Dependencies (pkgconf Host Tool)
       run: |
@@ -74,5 +76,5 @@ jobs:
       if: ${{ inputs.vcpkg_refresh_only == false }}
       uses: actions/upload-artifact@v4
       with:
-        name: publisher_convert-windows-x64
-        path: build/Release/publisher_convert.exe
+        name: publisher_convert-windows-x64-r${{ github.run_number }}
+        path: build/
