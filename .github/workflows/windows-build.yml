@@ -31,7 +31,6 @@ jobs:
       uses: actions/cache@v4
       with:
         path: |
-          ${{ github.workspace }}/vcpkg
           **/vcpkg_installed/
           **/build/vcpkg_installed/
           **/build/vcpkg/buildtrees/
@@ -40,23 +39,12 @@ jobs:
           ${{ runner.os }}-vcpkg-manifest-${{ hashFiles('**/vcpkg.json') }}-
           ${{ runner.os }}-vcpkg-manifest-
 
-    # 1. Clone vcpkg source code if directory is missing
-    - name: Clone vcpkg Repository
-      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
-      run: |
-        if (-not (Test-Path -Path "${{ env.VCPKG_ROOT }}")) {
-          git clone https://github.com/Microsoft/vcpkg.git "${{ env.VCPKG_ROOT }}"
-          cd "${{ env.VCPKG_ROOT }}"
-          & "${{ env.VCPKG_ROOT }}\bootstrap-vcpkg.bat"
-        }
-      shell: pwsh
-      
     - name: Install System Dependencies (pkgconf Host Tool)
       run: |
         choco install pkgconfiglite gperf
       shell: powershell
 
-    - name: Downloading Vcpkg 📥
+    - name: mkdir build/
       run: |
         cd ${{ github.workspace }}
         mkdir build -force
@@ -71,7 +59,7 @@ jobs:
       if: ${{ inputs.vcpkg_refresh_only == false }}
       run: |
         cmake -B build -S . `
-          -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake" `
+          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows
       shell: pwsh
 
