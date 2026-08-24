@@ -62,7 +62,6 @@ jobs:
       run: |
         cmake -B build -S . `
           -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_INSTALLED_ROOT="${{ github.workspace }}/vcpkg_installed" `
           -DVCPKG_TARGET_TRIPLET=x64-windows
       shell: pwsh
 
