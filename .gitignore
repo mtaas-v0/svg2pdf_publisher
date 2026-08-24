@@ -1,0 +1,19 @@
+# Ignore the entire build directory and its contents
+build/
+
+# Common C++ / CMake build outputs
+bin/
+obj/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CMake specific cache records
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+
+# vcpkg specific folders (installed dependencies)
+vcpkg_installed/
+.vcpkg-root
