@@ -5,7 +5,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 1. Look up native vcpkg configurations directly (removes PkgConfig rules)
-find_package(cairo CONFIG REQUIRED)
+# 1. Print the primary system prefixes CMake searches
+message(STATUS "DEBUG: CMAKE_SYSTEM_PREFIX_PATH = ${CMAKE_SYSTEM_PREFIX_PATH}")
+
+# 2. Print the search paths specifically targeted for packages
+message(STATUS "DEBUG: CMAKE_PREFIX_PATH = ${CMAKE_PREFIX_PATH}")
+
+# 3. Print the vcpkg toolchain path to verify it is actually loaded
+message(STATUS "DEBUG: CMAKE_TOOLCHAIN_FILE = ${CMAKE_TOOLCHAIN_FILE}")
+
+# Now attempt your search
+find_package(cairo REQUIRED)
+
 find_package(unofficial-librsvg CONFIG REQUIRED)
 find_package(Fontconfig CONFIG REQUIRED)
 
