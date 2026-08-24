@@ -1,0 +1,44 @@
+name: Windows Native Build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up vcpkg
+      run: |
+        cd C:\vcpkg
+        .\bootstrap-vcpkg.bat
+      shell: cmd
+
+    - name: Install System Dependencies via vcpkg
+      run: |
+        vcpkg install cairo librsvg fontconfig woff2 --triplet x64-windows
+      shell: cmd
+
+    - name: Configure CMake
+      run: |
+        cmake -B build -S . `
+          -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+          -DVCPKG_TARGET_TRIPLET=x64-windows
+      shell: pwsh
+
+    - name: Build Executable
+      run: |
+        cmake --build build --config Release
+      shell: pwsh
+
+    - name: Upload Build Output
+      uses: actions/upload-artifact@v4
+      with:
+        name: publisher_convert-windows-x64
+        path: build/Release/publisher_convert.exe

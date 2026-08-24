@@ -1,0 +1,10 @@
+{
+  "name": "svg2pdf-publisher",
+  "version-string": "1.0.0",
+  "dependencies": [
+    "cairo",
+    "librsvg",
+    "fontconfig",
+    "woff2"
+  ]
+}
