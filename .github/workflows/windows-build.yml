@@ -12,6 +12,10 @@ on:
   pull_request:
     branches: [ main, master ]
 
+env:
+  # Use the runner's workspace directory with a backslash
+  VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+  
 jobs:
   build-windows:
     runs-on: windows-2022
@@ -23,12 +27,24 @@ jobs:
 
     # Step 1: Cache vcpkg artifacts (Keep your existing step)
     - name: Cache vcpkg artifacts
+      id: cache-vcpkg
       uses: actions/cache@v4
       with:
-        path: ${{ github.workspace }}/vcpkg_cache
+        path: ${{ github.workspace }}/vcpkg
         key: ${{ runner.os }}-vcpkg-${{ hashFiles('vcpkg.json') }}
         restore-keys: ${{ runner.os }}-vcpkg-
 
+    # 1. Clone vcpkg source code if directory is missing
+    - name: Clone vcpkg Repository
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+      run: |
+        if (-not (Test-Path -Path "${{ env.VCPKG_ROOT }}")) {
+          git clone https://github.com/Microsoft/vcpkg.git "${{ env.VCPKG_ROOT }}"
+          cd "${{ env.VCPKG_ROOT }}"
+          & "${{ env.VCPKG_ROOT }}\bootstrap-vcpkg.bat"
+        }
+      shell: pwsh
+      
     - name: Install System Dependencies (pkgconf Host Tool)
       run: |
         choco install pkgconfiglite gperf
@@ -38,11 +54,9 @@ jobs:
       run: |
         cd ${{ github.workspace }}
         mkdir build -force
-        git clone https://github.com/Microsoft/vcpkg.git
-        cd vcpkg
-        .\bootstrap-vcpkg.bat
 
     - name: Install System Dependencies via vcpkg
+      if: steps.cache-vcpkg.outputs.cache-hit != 'true'
       run: |
         vcpkg install --triplet x64-windows
       shell: cmd
