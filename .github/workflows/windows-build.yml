@@ -21,7 +21,7 @@ jobs:
 
     - name: Install System Dependencies (pkgconf Host Tool)
       run: |
-        choco install pkgconfiglite gperf
+        choco install  gperf #pkgconfiglite
       shell: powershell
 
         
