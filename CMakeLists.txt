@@ -4,10 +4,17 @@ project(svg2pdf_publisher VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 1. Force the triplet BEFORE the project or any compiler detection happens
+set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic" CACHE STRING "")
+
 find_package(PkgConfig REQUIRED)
 
 # Pulls strictly cross-compiled paths via updated toolchain configuration mappings
-pkg_check_modules(CAIRO REQUIRED cairo)
+
+# 1. Ask for the native CMake config package vcpkg builds (no pkg-config required!)
+find_package(unofficial-cairo CONFIG REQUIRED)
+
+# pkg_check_modules(CAIRO REQUIRED cairo)
 pkg_check_modules(RSVG REQUIRED librsvg-2.0)
 pkg_check_modules(FONTCONFIG REQUIRED fontconfig)
 
@@ -26,7 +33,8 @@ target_include_directories(publisher_convert PRIVATE
 
 # Strips host paths out of the system linker targets
 target_link_libraries(publisher_convert PRIVATE 
-    ${CAIRO_LIBRARIES} 
+#    ${CAIRO_LIBRARIES} 
+    unofficial::cairo::cairo
     ${RSVG_LIBRARIES} 
     ${FONTCONFIG_LIBRARIES}
     ${WOFF2_DEC_LIB}

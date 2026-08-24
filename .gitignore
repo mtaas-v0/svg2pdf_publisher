@@ -1,6 +1,8 @@
 # Ignore the entire build directory and its contents
 build/
 
+vcpkg/**
+
 # Common C++ / CMake build outputs
 bin/
 obj/

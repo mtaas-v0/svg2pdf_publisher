@@ -26,8 +26,18 @@ jobs:
     - name: Execute Windows Cross-Build Sequence
       run: |
         # Leverage our target min-gw toolchain map during initialization
-        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=mingw-w64-x64.cmake -DCMAKE_BUILD_TYPE=Release
+        git clone https://github.com/microsoft/vcpkg
+        cd vcpkg
+        ./bootstrap-vcpkg.sh
+        cd ..
+        ./vcpkg/vcpkg install --triplet x64-windows
+        # -DCMAKE_TOOLCHAIN_FILE=mingw-w64-x64.cmake
+        cmake -B build -S .  -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_TOOLCHAIN_FILE=/workspaces/svg2pdf_publisher/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=x64-mingw-dynamic 
         cmake --build build
+
+
 
     - name: Consolidate Output Assets
       run: |
