@@ -31,6 +31,7 @@ jobs:
         mkdir build -force
 
     - name: vcpkg depend-info --x-manifest-pid=vcpkg.json
+      if: false
       run: vcpkg depend-info cairo:x64-windows
 
     - name: Run vcpkg (Installs & Caches Dependencies)
