@@ -14,8 +14,13 @@ message(STATUS "DEBUG: CMAKE_PREFIX_PATH = ${CMAKE_PREFIX_PATH}")
 # 3. Print the vcpkg toolchain path to verify it is actually loaded
 message(STATUS "DEBUG: CMAKE_TOOLCHAIN_FILE = ${CMAKE_TOOLCHAIN_FILE}")
 
-# Now attempt your search
-find_package(cairo REQUIRED)
+
+# 1. Load CMake's native PkgConfig module
+find_package(PkgConfig REQUIRED)
+
+# 2. Use pkg-config to locate Cairo and create an IMPORTED target
+pkg_check_modules(Cairo REQUIRED IMPORTED_TARGET cairo)
+
 
 find_package(unofficial-librsvg CONFIG REQUIRED)
 find_package(Fontconfig CONFIG REQUIRED)
@@ -29,7 +34,7 @@ add_executable(publisher_convert main.cpp)
 
 # 3. Explicitly bind compiled library targets directly 
 target_link_libraries(publisher_convert PRIVATE 
-    cairo::cairo
+    PkgConfig::Cairo
     unofficial::librsvg::librsvg
     Fontconfig::Fontconfig
     ${WOFF2_DEC_LIB}
