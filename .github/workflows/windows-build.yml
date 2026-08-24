@@ -1,6 +1,12 @@
 name: Windows Native Build
 
 on:
+  workflow_dispatch:
+    inputs:
+      vcpkg_refresh_only:
+        description: 'Check to vcpkg install only and save cache'
+        type: boolean
+        default: false
   push:
     branches: [ main, master ]
   pull_request:
@@ -37,6 +43,7 @@ jobs:
       shell: cmd
 
     - name: Configure CMake
+      if: ${{ inputs.vcpkg_refresh_only == false }}
       run: |
         cmake -B build -S . `
           -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
@@ -44,11 +51,13 @@ jobs:
       shell: pwsh
 
     - name: Build Executable
+      if: ${{ inputs.vcpkg_refresh_only == false }}
       run: |
         cmake --build build --config Release
       shell: pwsh
 
     - name: Upload Build Output
+      if: ${{ inputs.vcpkg_refresh_only == false }}
       uses: actions/upload-artifact@v4
       with:
         name: publisher_convert-windows-x64
