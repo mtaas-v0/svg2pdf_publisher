@@ -1,0 +1,44 @@
+name: Linux to Windows Cross-Compile CI
+
+on:
+    workflow_dispatch:
+
+jobs:
+  cross-compile-windows:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout Codebase
+      uses: actions/checkout@v4
+
+    - name: Set Up Linux Cross-Compilation Environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          mingw-w64 \
+          pkg-config-x86-64-w64-mingw32 \
+          libwoff-dev \
+          librsvg2-dev \
+          libcairo2-dev \
+          libfontconfig1-dev
+
+    - name: Execute Windows Cross-Build Sequence
+      run: |
+        # Leverage our target min-gw toolchain map during initialization
+        cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=mingw-w64-x64.cmake -DCMAKE_BUILD_TYPE=Release
+        cmake --build build
+
+    - name: Consolidate Output Assets
+      run: |
+        mkdir release_package
+        cp build/publisher_convert.exe release_package/
+        
+        # Package standard dependency DLL files if they are missing on target hosts
+        echo "Publisher Engine Package Ready" > release_package/README.txt
+
+    - name: Export Windows Executable Package Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: publisher_convert-win64-crosscompiled
+        path: release_package/

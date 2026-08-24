@@ -33,7 +33,7 @@ jobs:
 
     - name: Install System Dependencies via vcpkg
       run: |
-        vcpkg install cairo librsvg fontconfig woff2 --triplet x64-windows
+        vcpkg install --triplet x64-windows
       shell: cmd
 
     - name: Configure CMake
