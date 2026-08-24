@@ -30,6 +30,9 @@ jobs:
         cd ${{ github.workspace }}
         mkdir build -force
 
+    - name: vcpkg depend-info --x-manifest-pid=vcpkg.json
+      run: vcpkg depend-info --x-manifest-pid=vcpkg.json
+
     - name: Run vcpkg (Installs & Caches Dependencies)
       uses: lukka/run-vcpkg@v11
       env:
