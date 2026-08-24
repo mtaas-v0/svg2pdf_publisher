@@ -12,7 +12,7 @@ on:
   pull_request:
     branches: [ main, master ]
 
-env:
+# env:
   # Use the runner's workspace directory with a backslash
   # VCPKG_ROOT: ${{ github.workspace }}\vcpkg
   
