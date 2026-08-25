@@ -57,6 +57,7 @@ target_include_directories(publisher_convert PRIVATE ${WOFF2_INCLUDE_DIR})
 # svg_inspector
 
 add_executable(svg_inspector WIN32 svg_inspector_main.cpp)
+target_compile_definitions(svg_inspector PRIVATE UNICODE _UNICODE)
 
 target_link_libraries(svg_inspector PRIVATE 
     PkgConfig::Cairo
