@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
         size_t ttf_size = woff2::ComputeWOFF2FinalSize(woff2_buffer.data(), woff2_buffer.size());
         if (ttf_size > 0) {
             std::vector<uint8_t> ttf_buffer(ttf_size);
-            if (woff2::ConvertWOFF2ToTTF(woff2_buffer.data(), woff2_buffer.size(), ttf_buffer.data(), &ttf_size)) {
+            if (woff2::ConvertWOFF2ToTTF(woff2_buffer.data(), woff2_buffer.size(), ttf_buffer.data(), ttf_size)) {
                 FcConfig* config = FcConfigGetCurrent();
                 if (config) {
                     FcConfigAppFontAddMem(config, ttf_buffer.data(), static_cast<int>(ttf_size), FcTrue);
