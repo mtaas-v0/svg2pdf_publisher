@@ -30,7 +30,11 @@ pkg_check_modules(LIBRSVG librsvg-2.0 IMPORTED_TARGET REQUIRED)
 # 2. Map standard static file searches for your WOFF2 decompression library
 find_library(WOFF2_DEC_LIB NAMES woff2dec)
 find_library(WOFF2_COMMON_LIB NAMES woff2common)
+
 find_path(WOFF2_INCLUDE_DIR NAMES woff2/decode.h)
+
+
+find_package(unofficial-brotli CONFIG REQUIRED)
 
 add_executable(publisher_convert main.cpp)
 
@@ -41,6 +45,10 @@ target_link_libraries(publisher_convert PRIVATE
     PkgConfig::Fontconfig
     ${WOFF2_DEC_LIB}
     ${WOFF2_COMMON_LIB}
+    
+    unofficial::brotli::brotlidec
+    unofficial::brotli::brotlicommon
+    
 )
 
 target_include_directories(publisher_convert PRIVATE ${WOFF2_INCLUDE_DIR})
