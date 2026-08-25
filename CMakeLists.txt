@@ -52,3 +52,25 @@ target_link_libraries(publisher_convert PRIVATE
 )
 
 target_include_directories(publisher_convert PRIVATE ${WOFF2_INCLUDE_DIR})
+
+
+# svg_inspector
+
+add_executable(svg_inspector WIN32 svg_inspector_main.cpp)
+
+target_link_libraries(svg_inspector PRIVATE 
+    PkgConfig::Cairo
+    PkgConfig::LIBRSVG
+    PkgConfig::Fontconfig
+    
+    ${WOFF2_DEC_LIB}
+    ${WOFF2_COMMON_LIB}
+    
+    unofficial::brotli::brotlidec
+    unofficial::brotli::brotlicommon
+
+    
+    user32 
+    gdi32 
+    comdlg32
+)
