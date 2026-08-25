@@ -44,7 +44,6 @@ add_executable(publisher_convert main.cpp)
 # 3. Explicitly bind compiled library targets directly 
 target_link_libraries(publisher_convert PRIVATE 
 
-    cJSON::cjson
     
     PkgConfig::Cairo
     PkgConfig::LIBRSVG
@@ -68,6 +67,9 @@ target_compile_definitions(svg_inspector PRIVATE
      )
 
 target_link_libraries(svg_inspector PRIVATE 
+
+    cJSON::cjson
+    
     PkgConfig::Cairo
     PkgConfig::LIBRSVG
     PkgConfig::Fontconfig
