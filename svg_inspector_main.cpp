@@ -132,20 +132,23 @@ bool SaveCairoSurfaceToTIFF(cairo_surface_t* surface, const std::wstring& filepa
     uint32_t dataOffset = 8 + 2 + numEntries * 12 + 4 + 16; // IFD + nextIFD(0) + extra data
     uint32_t imageSize = width * height * 4;
 
-    std::vector<TiffTag> tags = {
-        { 256, 4, 1, (uint32_t)width },                         // ImageWidth
-        { 257, 4, 1, (uint32_t)height },                        // ImageLength
-        { 258, 3, 4, 8 + 2 + numEntries * 12 + 4 },             // BitsPerSample (Points to 8,8,8,8)
-        { 259, 3, 1, 1 },                                       // Compression (None)
-        { 262, 3, 1, 2 },                                       // PhotometricInterpretation (RGB)
-        { 273, 4, 1, dataOffset },                              // StripOffsets
-        { 277, 3, 1, 4 },                                       // SamplesPerPixel (RGBA)
-        { 278, 4, 1, (uint32_t)height },                        // RowsPerStrip
-        { 279, 4, 1, imageSize },                               // StripByteCounts
-        { 282, 5, 1, 8 + 2 + numEntries * 12 + 4 + 8 },         // XResolution
-        { 283, 5, 1, 8 + 2 + numEntries * 12 + 4 + 8 },         // YResolution
-        { 296, 3, 1, 2 }                                        // ResolutionUnit (Inch)
-    };
+uint32_t extraDataOffset = static_cast<uint32_t>(8 + 2 + numEntries * 12 + 4);
+
+std::vector<TiffTag> tags = {
+    { 256, 4, 1, static_cast<uint32_t>(width) },
+    { 257, 4, 1, static_cast<uint32_t>(height) },
+    { 258, 3, 4, extraDataOffset },
+    { 259, 3, 1, 1u },
+    { 262, 3, 1, 2u },
+    { 273, 4, 1, dataOffset },
+    { 277, 3, 1, 4u },
+    { 278, 4, 1, static_cast<uint32_t>(height) },
+    { 279, 4, 1, imageSize },
+    { 282, 5, 1, extraDataOffset + 8u },
+    { 283, 5, 1, extraDataOffset + 8u },
+    { 296, 3, 1, 2u }
+};
+
 
     for (const auto& tag : tags) {
         out.write((char*)&tag, sizeof(tag));
@@ -227,10 +230,21 @@ public:
 
         if (!svg_handle) return;
 
+
+
+#if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
+
         double doc_w = 0, doc_h = 0;
         rsvg_handle_get_intrinsic_size_in_pixels(svg_handle, &doc_w, &doc_h);
         if (doc_w <= 0 || doc_h <= 0) { doc_w = 800; doc_h = 600; }
 
+#else
+        RsvgDimensionData dim;
+        rsvg_handle_get_dimensions(svg_handle, &dim);
+        double doc_w = (dim.width > 0) ? static_cast<double>(dim.width) : 800.0;
+        double doc_h = (dim.height > 0) ? static_cast<double>(dim.height) : 600.0;
+
+#endif
         cairo_save(cr);
 
         // Apply Viewport Transformations: Center -> Pan -> Rotate -> Scale
@@ -239,10 +253,30 @@ public:
         cairo_scale(cr, state.zoom, state.zoom);
         cairo_translate(cr, -doc_w / 2.0, -doc_h / 2.0);
 
-        RsvgRectangle viewport = { 0.0, 0.0, doc_w, doc_h };
-        GError* err = nullptr;
-        rsvg_handle_render_document(svg_handle, cr, &viewport, &err);
-        if (err) g_error_free(err);
+
+// Auto-route based on the platform's linked library age
+#if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
+    RsvgRectangle viewport = { 0.0, 0.0, doc_w, doc_h };
+    GError* err = nullptr;
+    gboolean success = rsvg_handle_render_document(handle, cr, &viewport, &err);
+    if (err) g_error_free(err);
+    
+#else
+    double rsvg_w = 0, rsvg_h = 0;
+    RsvgDimensionData dimensions;
+    rsvg_handle_get_dimensions(handle, &dimensions);
+    rsvg_w = dimensions.width;
+    rsvg_h = dimensions.height;
+    
+    if (rsvg_w > 0 && rsvg_h > 0) {
+        double scale_x = doc_w / rsvg_w;
+        double scale_y = doc_h / rsvg_h;
+        double scale = std::min(scale_x, scale_y);
+        cairo_scale(cr, scale, scale);
+    }
+    gboolean success = rsvg_handle_render_cairo(handle, cr);
+#endif
+        
 
         cairo_restore(cr);
 
@@ -384,12 +418,17 @@ std::string ExecuteRPCCommand(const std::string& line) {
 
 void StartNamedPipeServer(std::atomic<bool>& running) {
     while (running) {
-        HANDLE hPipe = CreateNamedPipeW(
-            PIPE_NAME,
-            PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_LINE | PIPE_READMODE_LINE | PIPE_WAIT,
-            1, 4096, 4096, 0, NULL
-        );
+        
+HANDLE hPipe = CreateNamedPipeW(
+    PIPE_NAME,
+    PIPE_ACCESS_DUPLEX,
+    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+    1,                  // nMaxInstances
+    4096,               // nOutBufferSize
+    4096,               // nInBufferSize
+    0,                  // nDefaultTimeOut
+    NULL                // lpSecurityAttributes
+);
 
         if (hPipe == INVALID_HANDLE_VALUE) {
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
