@@ -200,19 +200,22 @@ public:
     int backbuffer_w = 0;
     int backbuffer_h = 0;
 
-    void LoadSVG(const std::string& filepath) {
+    
+    bool LoadSVG(const std::string& filepath) {
         GError* error = nullptr;
+        RsvgHandle* new_handle = rsvg_handle_new_from_file(filepath.c_str(), &error);
+        if (!new_handle || error) {
+            if (error) g_error_free(error);
+            return false;
+        }
+    
         if (svg_handle) {
             g_object_unref(svg_handle);
-            svg_handle = nullptr;
         }
-        svg_handle = rsvg_handle_new_from_file(filepath.c_str(), &error);
-        if (error) {
-            g_error_free(error);
-            return;
-        }
+        svg_handle = new_handle;
         ResetView();
         Invalidate();
+        return true;
     }
 
     void ResetView() {
@@ -221,9 +224,11 @@ public:
         state.pan_y = 0.0;
         state.rotation_deg = 0.0;
     }
-
+    
     void Invalidate() {
-        if (hwnd) InvalidateRect(hwnd, NULL, FALSE);
+        if (hwnd) {
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        }
     }
 
     void RenderToCairo(cairo_t* cr, double target_w, double target_h) {
@@ -386,16 +391,27 @@ std::string ExecuteRPCCommand(const std::string& line) {
     // Minimal JSON parsing without heavy dependencies
     std::istringstream iss(line);
     std::string key;
-    
+        
     if (line.find("\"load\"") != std::string::npos) {
-        size_t first = line.find_first_of("\"", line.find("\"load\"") + 6);
-        size_t last = line.find_first_of("\"", first + 1);
-        if (first != std::string::npos && last != std::string::npos) {
-            std::string file = line.substr(first + 1, last - first - 1);
-            g_app.LoadSVG(file);
-            return "{\"status\":\"ok\",\"result\":\"loaded\"}\n";
+        size_t file_key = line.find("\"file\"");
+        if (file_key != std::string::npos) {
+            size_t colon = line.find(':', file_key);
+            size_t first_quote = line.find('\"', colon);
+            size_t second_quote = line.find('\"', first_quote + 1);
+    
+            if (first_quote != std::string::npos && second_quote != std::string::npos) {
+                std::string file_path = line.substr(first_quote + 1, second_quote - first_quote - 1);
+                if (g_app.LoadSVG(file_path)) {
+                    return "{\"status\":\"ok\",\"result\":\"loaded\"}\n";
+                } else {
+                    return "{\"status\":\"error\",\"message\":\"failed to load SVG file\"}\n";
+                }
+            }
         }
-    } else if (line.find("\"zoom\"") != std::string::npos) {
+        return "{\"status\":\"error\",\"message\":\"invalid file path\"}\n";
+    }
+    
+    else if (line.find("\"zoom\"") != std::string::npos) {
         float factor = 1.0f;
         sscanf_s(line.c_str(), "%*[^0-9.-]%f", &factor);
         g_app.state.zoom *= factor;
