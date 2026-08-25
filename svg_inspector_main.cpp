@@ -1,4 +1,5 @@
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX                 // <-- Add this or min will be expanded and conflict with std::min
 #define _USE_MATH_DEFINES
 #include <windows.h>
 #include <windowsx.h>
