@@ -64,7 +64,7 @@ jobs:
         VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-archives,readwrite"
 #        VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
       run: |
-        cmake -B build -S .  --config Release `
+        cmake -B build -S .   -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows
         
