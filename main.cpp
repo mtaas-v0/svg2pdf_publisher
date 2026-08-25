@@ -67,7 +67,7 @@ int main(int argc, char* argv[]) {
             if (woff2::ConvertWOFF2ToTTF(woff2_buffer.data(), woff2_buffer.size(), ttf_buffer.data(), ttf_size)) {
                 FcConfig* config = FcConfigGetCurrent();
                 if (config) {
-                    FcConfigAppFontAddMem(config, ttf_buffer.data(), static_cast<int>(ttf_size), FcTrue);
+                    // FcConfigAppFontAddMem(config, ttf_buffer.data(), static_cast<int>(ttf_size), FcTrue);
                 }
             }
         }
@@ -88,10 +88,11 @@ int main(int argc, char* argv[]) {
     cairo_surface_t* surface = cairo_pdf_surface_create(pdf_path.c_str(), letter_width, letter_height);
     cairo_t* cr = cairo_create(surface);
 
-    RsvgRectangle viewport = { 0.0, 0.0, letter_width, letter_height };
+    
     
 // Auto-route based on the platform's linked library age
 #if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
+    RsvgRectangle viewport = { 0.0, 0.0, letter_width, letter_height };
     gboolean success = rsvg_handle_render_document(handle, cr, &viewport, &error);
 #else
     double rsvg_w = 0, rsvg_h = 0;
