@@ -8,6 +8,7 @@
     "librsvg",
     "fontconfig",
     "woff2",
-    "brotli"
+    "brotli",
+    "cjson"
   ]
 }
