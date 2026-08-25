@@ -18,6 +18,9 @@ message(STATUS "DEBUG: CMAKE_TOOLCHAIN_FILE = ${CMAKE_TOOLCHAIN_FILE}")
 # 1. Load CMake's native PkgConfig module
 find_package(PkgConfig REQUIRED)
 
+# 1. cJSON (Native CMake Config)
+find_package(cJSON CONFIG REQUIRED)
+
 # 2. Use pkg-config to locate Cairo and create an IMPORTED target
 
 pkg_check_modules(Fontconfig REQUIRED IMPORTED_TARGET fontconfig)
