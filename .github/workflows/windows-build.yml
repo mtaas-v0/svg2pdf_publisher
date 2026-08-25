@@ -51,7 +51,12 @@ jobs:
         VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-archives,readwrite"
       with:
         vcpkgJsonGlob: '**/vcpkg.json'
-
+        
+    - name: Debug vcpkg config
+      continue-on-error: true
+      run: |
+        vcpkg install --dry-run
+        
     - name: Configure CMake
       env:
         ACTIONS_CACHE_URL: ${{ env.ACTIONS_CACHE_URL }}
@@ -59,15 +64,10 @@ jobs:
         VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-archives,readwrite"
 #        VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
       run: |
-        cmake -B build -S . `
+        cmake -B build -S .  --config Release `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows
         
-    - name: Debug vcpkg / cairo
-      continue-on-error: true
-      run: |
-        vcpkg list
-
     - name: Build Project
       continue-on-error: false
       run: |
