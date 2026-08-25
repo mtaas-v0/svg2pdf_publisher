@@ -195,10 +195,17 @@ public:
     bool is_panning = false;
     POINT last_mouse{};
 
-    // Backbuffer
+    // Backbuffers & Caching
     cairo_surface_t* backbuffer_surface = nullptr;
+    cairo_surface_t* cached_surface = nullptr;
     int backbuffer_w = 0;
     int backbuffer_h = 0;
+    
+    // Cache tracking
+    bool cache_dirty = true;
+    double cached_pan_x = 0.0;
+    double cached_pan_y = 0.0;
+
 
     
     bool LoadSVG(const std::string& filepath) {
@@ -224,12 +231,7 @@ public:
         state.pan_y = 0.0;
         state.rotation_deg = 0.0;
     }
-    
-    void Invalidate() {
-        if (hwnd) {
-            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-        }
-    }
+
 
     void RenderToCairo(cairo_t* cr, double target_w, double target_h) {
         // Clear background with white
@@ -310,29 +312,108 @@ public:
         }
     }
 
+    void Invalidate(bool force_dirty = true) {
+        if (force_dirty) {
+            cache_dirty = true;
+        }
+        if (hwnd) {
+            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+        }
+    }
+
+    void RenderVectorSVG(cairo_t* cr, double target_w, double target_h, double px, double py) {
+        // 1. Strict CPU Clipping: Prevents Cairo/librsvg from rasterizing off-screen paths at 20x+ zoom
+        cairo_save(cr);
+        cairo_rectangle(cr, 0, 0, target_w, target_h);
+        cairo_clip(cr);
+
+        cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+        cairo_paint(cr);
+
+        if (svg_handle) {
+            RsvgDimensionData dim;
+            rsvg_handle_get_dimensions(svg_handle, &dim);
+            double doc_w = (dim.width > 0) ? (double)dim.width : 800.0;
+            double doc_h = (dim.height > 0) ? (double)dim.height : 600.0;
+
+            cairo_save(cr);
+            // Apply transformations
+            cairo_translate(cr, target_w / 2.0 + px, target_h / 2.0 + py);
+            cairo_rotate(cr, state.rotation_deg * M_PI / 180.0);
+            cairo_scale(cr, state.zoom, state.zoom);
+            cairo_translate(cr, -doc_w / 2.0, -doc_h / 2.0);
+
+            rsvg_handle_render_cairo(svg_handle, cr);
+            cairo_restore(cr);
+        }
+        cairo_restore(cr); // restore clip
+    }
+
     void Paint(HDC hdc, RECT rc) {
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
         if (w <= 0 || h <= 0) return;
 
+        // Reallocate surfaces on resize
         if (!backbuffer_surface || backbuffer_w != w || backbuffer_h != h) {
             if (backbuffer_surface) cairo_surface_destroy(backbuffer_surface);
+            if (cached_surface) cairo_surface_destroy(cached_surface);
+            
             backbuffer_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+            cached_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
             backbuffer_w = w;
             backbuffer_h = h;
+            cache_dirty = true;
         }
 
-        cairo_t* cr = cairo_create(backbuffer_surface);
-        RenderToCairo(cr, w, h);
-        cairo_destroy(cr);
+        // Full vector re-render when cache is invalidated
+        if (cache_dirty) {
+            cairo_t* ccr = cairo_create(cached_surface);
+            RenderVectorSVG(ccr, w, h, state.pan_x, state.pan_y);
+            cairo_destroy(ccr);
+            cairo_surface_flush(cached_surface);
 
+            cached_pan_x = state.pan_x;
+            cached_pan_y = state.pan_y;
+            cache_dirty = false;
+        }
+
+        // Fast Paint: Copy cached raster to screen backbuffer (offset by pan delta during drag)
+        cairo_t* bcr = cairo_create(backbuffer_surface);
+        cairo_set_source_rgb(bcr, 0.9, 0.9, 0.9); // background for out-of-bounds drag
+        cairo_paint(bcr);
+
+        double dx = state.pan_x - cached_pan_x;
+        double dy = state.pan_y - cached_pan_y;
+
+        cairo_set_source_surface(bcr, cached_surface, dx, dy);
+        cairo_paint(bcr);
+
+        // Draw Paper Aspect Frame overlay if enabled
+        if (state.lock_aspect_to_paper) {
+            PaperDimensions pd = GetPaperDimensions(state.paper_size);
+            double paper_ratio = pd.width_pt / pd.height_pt;
+            double canvas_ratio = (double)w / (double)h;
+            double frame_w = (canvas_ratio > paper_ratio) ? (h * paper_ratio) : w;
+            double frame_h = (canvas_ratio > paper_ratio) ? h : (w / paper_ratio);
+            double fx = (w - frame_w) / 2.0;
+            double fy = (h - frame_h) / 2.0;
+
+            cairo_set_source_rgba(bcr, 0.85, 0.15, 0.15, 0.85);
+            cairo_set_line_width(bcr, 2.0);
+            cairo_rectangle(bcr, fx, fy, frame_w, frame_h);
+            cairo_stroke(bcr);
+        }
+
+        cairo_destroy(bcr);
         cairo_surface_flush(backbuffer_surface);
-        unsigned char* data = cairo_image_surface_get_data(backbuffer_surface);
 
+        // Blit to Win32 Device Context
+        unsigned char* data = cairo_image_surface_get_data(backbuffer_surface);
         BITMAPINFO bmi = {};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h; // Top-down
+        bmi.bmiHeader.biHeight = -h;
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
@@ -391,8 +472,31 @@ std::string ExecuteRPCCommand(const std::string& line) {
     // Minimal JSON parsing without heavy dependencies
     std::istringstream iss(line);
     std::string key;
+
         
-    if (line.find("\"load\"") != std::string::npos) {
+    if (line.find("\"get_viewport\"") != std::string::npos || line.find("\"get-viewport\"") != std::string::npos) {
+        const char* paper_str = "Custom";
+        if (g_app.state.paper_size == PAPER_A4) paper_str = "A4";
+        else if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
+        else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
+    
+        std::ostringstream json;
+        json << "{"
+             << "\"status\":\"ok\","
+             << "\"viewport\":{"
+             << "\"zoom\":" << g_app.state.zoom << ","
+             << "\"pan_x\":" << g_app.state.pan_x << ","
+             << "\"pan_y\":" << g_app.state.pan_y << ","
+             << "\"rotation_deg\":" << g_app.state.rotation_deg << ","
+             << "\"aspect_locked\":" << (g_app.state.lock_aspect_to_paper ? "true" : "false") << ","
+             << "\"paper_size\":\"" << paper_str << "\","
+             << "\"export_dpi\":" << g_app.state.export_dpi << ","
+             << "\"canvas_width\":" << g_app.backbuffer_w << ","
+             << "\"canvas_height\":" << g_app.backbuffer_h
+             << "}}\n";
+        return json.str();
+    }
+    else if (line.find("\"load\"") != std::string::npos) {
         size_t file_key = line.find("\"file\"");
         if (file_key != std::string::npos) {
             size_t colon = line.find(':', file_key);
@@ -506,7 +610,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.pan_y += (y - g_app.last_mouse.y);
             g_app.last_mouse.x = x;
             g_app.last_mouse.y = y;
-            g_app.Invalidate();
+            
+            // Fast redraw without vector re-rasterization
+            g_app.Invalidate(false); 
+            
         }
         return 0;
 
@@ -514,6 +621,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (g_app.is_panning) {
             g_app.is_panning = false;
             ReleaseCapture();
+
+            // Settle & crisp re-render
+            g_app.Invalidate(true); 
         }
         return 0;
 
