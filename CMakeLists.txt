@@ -68,7 +68,7 @@ target_compile_definitions(svg_inspector PRIVATE
 
 target_link_libraries(svg_inspector PRIVATE 
 
-    cJSON::cjson
+    cjson
     
     PkgConfig::Cairo
     PkgConfig::LIBRSVG
