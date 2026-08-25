@@ -82,13 +82,28 @@ typedef struct {
     double height_pt;
 } PaperDimensions;
 
+
 static PaperDimensions GetPaperDimensions(PaperSize size) {
+    PaperDimensions pd;
     switch (size) {
-        case PAPER_A4:     return (PaperDimensions){ 595.276, 841.890 };
-        case PAPER_A3:     return (PaperDimensions){ 841.890, 1190.551 };
-        case PAPER_LETTER: return (PaperDimensions){ 612.000, 792.000 };
-        default:           return (PaperDimensions){ 800.0, 600.0 };
+        case PAPER_A4:
+            pd.width_pt = 595.276;
+            pd.height_pt = 841.890;
+            break;
+        case PAPER_A3:
+            pd.width_pt = 841.890;
+            pd.height_pt = 1190.551;
+            break;
+        case PAPER_LETTER:
+            pd.width_pt = 612.000;
+            pd.height_pt = 792.000;
+            break;
+        default:
+            pd.width_pt = 800.0;
+            pd.height_pt = 600.0;
+            break;
     }
+    return pd;
 }
 
 typedef struct {
