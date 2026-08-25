@@ -51,20 +51,20 @@ jobs:
         cmake -B build -S . `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
           -DVCPKG_TARGET_TRIPLET=x64-windows
-
-    - name: Build Project
-      continue-on-error: true
-      run: |
-        cmake --build build --config Release
         
     - name: Debug vcpkg / cairo
       continue-on-error: true
       run: |
         vcpkg list
 
+    - name: Build Project
+      continue-on-error: false
+      run: |
+        cmake --build build --config Release
+
     - name: Upload Build Output
       uses: actions/upload-artifact@v4
-      continue-on-error: true
+      continue-on-error: false
       with:
         name: publisher_convert-windows-x64-r${{ github.run_number }}
         path: build/
