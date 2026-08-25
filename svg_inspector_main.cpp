@@ -17,6 +17,8 @@
 #include <cairo-pdf.h>
 #include <librsvg/rsvg.h>
 
+#include <algorithm>             // <-- Provides std::min, std::max, std::clamp
+
 // -------------------------------------------------------------
 // Constants & Structures
 // -------------------------------------------------------------
@@ -258,13 +260,13 @@ public:
 #if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
     RsvgRectangle viewport = { 0.0, 0.0, doc_w, doc_h };
     GError* err = nullptr;
-    gboolean success = rsvg_handle_render_document(handle, cr, &viewport, &err);
+    gboolean success = rsvg_handle_render_document(svg_handle, cr, &viewport, &err);
     if (err) g_error_free(err);
     
 #else
     double rsvg_w = 0, rsvg_h = 0;
     RsvgDimensionData dimensions;
-    rsvg_handle_get_dimensions(handle, &dimensions);
+    rsvg_handle_get_dimensions(svg_handle, &dimensions);
     rsvg_w = dimensions.width;
     rsvg_h = dimensions.height;
     
@@ -274,7 +276,7 @@ public:
         double scale = std::min(scale_x, scale_y);
         cairo_scale(cr, scale, scale);
     }
-    gboolean success = rsvg_handle_render_cairo(handle, cr);
+    gboolean success = rsvg_handle_render_cairo(svg_handle, cr);
 #endif
         
 
