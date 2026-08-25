@@ -1,598 +1,1138 @@
 #define WIN32_LEAN_AND_MEAN
-#define NOMINMAX                 // <-- Add this or min will be expanded and conflict with std::min
+#define NOMINMAX
 #define _USE_MATH_DEFINES
+
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
-#include <cmath>
-#include <string>
-#include <vector>
-#include <memory>
-#include <thread>
-#include <atomic>
-#include <sstream>
-#include <fstream>
-#include <iostream>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <math.h>
 
 #include <cairo.h>
 #include <cairo-pdf.h>
 #include <librsvg/rsvg.h>
 
-#include <algorithm>             // <-- Provides std::min, std::max, std::clamp
+// -------------------------------------------------------------
+// Constants & Menu Command Identifiers
+// -------------------------------------------------------------
+#define MAX_LAYERS 64
+#define MAX_HITTESTS 128
+#define MAX_ANNOTATIONS 256
+#define MAX_EVENT_QUEUE 128
+#define DEFAULT_PIPE_NAME L"\\\\.\\pipe\\svgviewer_ipc"
+
+// Menu IDs
+#define IDM_FILE_OPEN             1001
+#define IDM_FILE_EXPORT_BMP       1002
+#define IDM_FILE_EXPORT_TIFF      1003
+#define IDM_FILE_EXPORT_PDF       1004
+#define IDM_FILE_EXIT             1005
+
+#define IDM_VIEW_ZOOM_IN          1101
+#define IDM_VIEW_ZOOM_OUT         1102
+#define IDM_VIEW_RESET            1103
+#define IDM_VIEW_ROTATE_CW        1104
+#define IDM_VIEW_ROTATE_CCW       1105
+#define IDM_VIEW_TOGGLE_ASPECT    1106
+#define IDM_VIEW_PAPER_A4         1107
+#define IDM_VIEW_PAPER_A3         1108
+#define IDM_VIEW_PAPER_LETTER     1109
+#define IDM_VIEW_DPI_150          1110
+#define IDM_VIEW_DPI_300          1111
+#define IDM_VIEW_DPI_600          1112
+
+#define IDM_LAYER_ATTACH_FILE     1201
+#define IDM_LAYER_CLEAR_ALL       1202
+
+#define IDM_ANNOT_ADD_POINT       1301
+#define IDM_ANNOT_ADD_RECT        1302
+#define IDM_ANNOT_ADD_POLY        1303
+#define IDM_ANNOT_ADD_ARROW       1304
+#define IDM_ANNOT_SAVE            1305
+#define IDM_ANNOT_LOAD            1306
+#define IDM_ANNOT_CLEAR           1307
+
+#define IDM_PIPE_TOGGLE           1401
+#define IDM_PIPE_RENAME           1402
+
+// Context Menu Dynamic IDs
+#define IDM_CTX_ATTACH_HERE       2001
+#define IDM_CTX_ANNOT_POINT_HERE  2002
+#define IDM_CTX_ANNOT_RECT_HERE   2003
+#define IDM_CTX_ANNOT_ARROW_HERE  2004
+#define IDM_CTX_LAYER_DETACH      2100
+#define IDM_CTX_HITTEST_BASE      3000
 
 // -------------------------------------------------------------
-// Constants & Structures
+// Data Structures
 // -------------------------------------------------------------
-#define WM_USER_TRIGGER_RENDER (WM_USER + 1)
-#define WM_USER_DISPATCH_CMD   (WM_USER + 2)
-#define PIPE_NAME L"\\\\.\\pipe\\svgviewer_ipc"
-
-enum PaperSize {
+typedef enum {
     PAPER_CUSTOM = 0,
-    PAPER_A4,       // 210 x 297 mm -> 595.28 x 841.89 pt
-    PAPER_A3,       // 297 x 420 mm -> 841.89 x 1190.55 pt
-    PAPER_LETTER    // 8.5 x 11 in   -> 612.0  x 792.0 pt
-};
+    PAPER_A4,
+    PAPER_A3,
+    PAPER_LETTER
+} PaperSize;
 
-struct PaperDimensions {
+typedef struct {
     double width_pt;
     double height_pt;
-};
+} PaperDimensions;
 
-PaperDimensions GetPaperDimensions(PaperSize size) {
+static PaperDimensions GetPaperDimensions(PaperSize size) {
     switch (size) {
-        case PAPER_A4:     return { 595.276, 841.890 };
-        case PAPER_A3:     return { 841.890, 1190.551 };
-        case PAPER_LETTER: return { 612.000, 792.000 };
-        default:           return { 800.0, 600.0 };
+        case PAPER_A4:     return (PaperDimensions){ 595.276, 841.890 };
+        case PAPER_A3:     return (PaperDimensions){ 841.890, 1190.551 };
+        case PAPER_LETTER: return (PaperDimensions){ 612.000, 792.000 };
+        default:           return (PaperDimensions){ 800.0, 600.0 };
     }
 }
 
-struct ViewState {
-    double zoom = 1.0;
-    double pan_x = 0.0;
-    double pan_y = 0.0;
-    double rotation_deg = 0.0; // in degrees
-    bool lock_aspect_to_paper = false;
-    PaperSize paper_size = PAPER_A4;
-    int export_dpi = 300;
-};
+typedef struct {
+    double zoom;
+    double pan_x;
+    double pan_y;
+    double rotation_deg;
+    bool lock_aspect_to_paper;
+    PaperSize paper_size;
+    int export_dpi;
+} ViewState;
 
-// -------------------------------------------------------------
-// Pure CPU Encoders: BMP & Baseline TIFF
-// -------------------------------------------------------------
+typedef struct {
+    char svguid[64];
+    char filepath[MAX_PATH];
+    RsvgHandle* handle;
+    double x, y;
+    double scale;
+    double rotation_deg;
+    double intrinsic_w, intrinsic_h;
+} SvgLayer;
+
+typedef struct {
+    char hittest_uid[64];
+    char svguid[64];
+    double x, y, w, h;
+    char commands[8][64];
+    int num_commands;
+} HitTestArea;
+
+typedef struct {
+    char hittest_uid[64];
+    char command[64];
+} ContextMenuEvent;
+
+typedef enum {
+    ANNOT_POINT_TEXT = 0,
+    ANNOT_RECT_TEXT,
+    ANNOT_POLYGON,
+    ANNOT_ARROW
+} AnnotType;
+
+typedef struct {
+    double x, y;
+} Point2D;
+
+typedef struct {
+    char id[64];
+    AnnotType type;
+    char text[256];
+    double x, y, w, h;
+    double arrow_tip_x, arrow_tip_y;
+    Point2D poly_points[16];
+    int num_points;
+} Annotation;
+
 #pragma pack(push, 1)
-struct BMPHeader {
-    uint16_t bfType{ 0x4D42 };
-    uint32_t bfSize{ 0 };
-    uint16_t bfReserved1{ 0 };
-    uint16_t bfReserved2{ 0 };
-    uint32_t bfOffBits{ 54 };
-    uint32_t biSize{ 40 };
-    int32_t  biWidth{ 0 };
-    int32_t  biHeight{ 0 };
-    uint16_t biPlanes{ 1 };
-    uint16_t biBitCount{ 32 };
-    uint32_t biCompression{ 0 };
-    uint32_t biSizeImage{ 0 };
-    int32_t  biXPelsPerMeter{ 3780 };
-    int32_t  biYPelsPerMeter{ 3780 };
-    uint32_t biClrUsed{ 0 };
-    uint32_t biClrImportant{ 0 };
-};
+typedef struct {
+    uint16_t bfType;
+    uint32_t bfSize;
+    uint16_t bfReserved1;
+    uint16_t bfReserved2;
+    uint32_t bfOffBits;
+    uint32_t biSize;
+    int32_t  biWidth;
+    int32_t  biHeight;
+    uint16_t biPlanes;
+    uint16_t biBitCount;
+    uint32_t biCompression;
+    uint32_t biSizeImage;
+    int32_t  biXPelsPerMeter;
+    int32_t  biYPelsPerMeter;
+    uint32_t biClrUsed;
+    uint32_t biClrImportant;
+} BMPHeader;
 
-struct TiffTag {
+typedef struct {
     uint16_t tag;
     uint16_t type;
     uint32_t count;
     uint32_t value_offset;
-};
+} TiffTag;
 #pragma pack(pop)
 
-bool SaveCairoSurfaceToBMP(cairo_surface_t* surface, const std::wstring& filepath) {
+// -------------------------------------------------------------
+// Global Application State
+// -------------------------------------------------------------
+typedef struct {
+    HWND hwnd;
+    ViewState state;
+    CRITICAL_SECTION cs;
+
+    // Multi-Layer SVG Engine
+    SvgLayer layers[MAX_LAYERS];
+    int num_layers;
+    char root_svg_path[MAX_PATH];
+
+    // Annotations
+    Annotation annotations[MAX_ANNOTATIONS];
+    int num_annotations;
+
+    // Hit Testing & Events
+    HitTestArea hit_areas[MAX_HITTESTS];
+    int num_hit_areas;
+    ContextMenuEvent event_queue[MAX_EVENT_QUEUE];
+    int num_events;
+
+    // Interaction Cache & Backbuffers
+    bool is_panning;
+    POINT last_mouse;
+    cairo_surface_t* backbuffer_surface;
+    cairo_surface_t* cached_surface;
+    int backbuffer_w;
+    int backbuffer_h;
+    bool cache_dirty;
+    double cached_pan_x;
+    double cached_pan_y;
+
+    // Named Pipe IPC Server
+    wchar_t pipe_name[MAX_PATH];
+    volatile LONG pipe_enabled;
+    HANDLE h_pipe_thread;
+    volatile LONG rpc_running;
+} AppState;
+
+static AppState g_app;
+
+// -------------------------------------------------------------
+// Coordinate Space Conversions
+// -------------------------------------------------------------
+void ScreenToWorld(double sx, double sy, double* wx, double* wy) {
+    double cx = (g_app.backbuffer_w / 2.0) + g_app.state.pan_x;
+    double cy = (g_app.backbuffer_h / 2.0) + g_app.state.pan_y;
+    double dx = sx - cx;
+    double dy = sy - cy;
+    double rad = -g_app.state.rotation_deg * M_PI / 180.0;
+    double rx = dx * cos(rad) - dy * sin(rad);
+    double ry = dx * sin(rad) + dy * cos(rad);
+    *wx = rx / g_app.state.zoom;
+    *wy = ry / g_app.state.zoom;
+}
+
+// -------------------------------------------------------------
+// Pure CPU Exporters (BMP, TIFF, PDF)
+// -------------------------------------------------------------
+bool SaveCairoSurfaceToBMP(cairo_surface_t* surface, const wchar_t* filepath) {
     int width = cairo_image_surface_get_width(surface);
     int height = cairo_image_surface_get_height(surface);
     int stride = cairo_image_surface_get_stride(surface);
     unsigned char* data = cairo_image_surface_get_data(surface);
 
-    BMPHeader hdr;
+    BMPHeader hdr = { 0 };
+    hdr.bfType = 0x4D42;
+    hdr.bfOffBits = sizeof(BMPHeader);
+    hdr.biSize = 40;
     hdr.biWidth = width;
-    hdr.biHeight = height; // Bottom-up if positive, or -height for top-down
+    hdr.biHeight = height;
+    hdr.biPlanes = 1;
+    hdr.biBitCount = 32;
     hdr.biSizeImage = stride * height;
-    hdr.bfSize = 54 + hdr.biSizeImage;
+    hdr.bfSize = hdr.bfOffBits + hdr.biSizeImage;
 
-    std::ofstream out(filepath, std::ios::binary);
-    if (!out) return false;
+    FILE* f = _wfopen(filepath, L"wb");
+    if (!f) return false;
 
-    out.write(reinterpret_cast<char*>(&hdr), sizeof(hdr));
-    // Flip rows vertically for standard Windows BMP
+    fwrite(&hdr, sizeof(hdr), 1, f);
     for (int y = height - 1; y >= 0; --y) {
-        out.write(reinterpret_cast<char*>(data + y * stride), width * 4);
+        fwrite(data + y * stride, 1, width * 4, f);
     }
+    fclose(f);
     return true;
 }
 
-bool SaveCairoSurfaceToTIFF(cairo_surface_t* surface, const std::wstring& filepath, int dpi) {
+bool SaveCairoSurfaceToTIFF(cairo_surface_t* surface, const wchar_t* filepath, int dpi) {
     int width = cairo_image_surface_get_width(surface);
     int height = cairo_image_surface_get_height(surface);
     int stride = cairo_image_surface_get_stride(surface);
     unsigned char* data = cairo_image_surface_get_data(surface);
 
-    std::ofstream out(filepath, std::ios::binary);
-    if (!out) return false;
+    FILE* f = _wfopen(filepath, L"wb");
+    if (!f) return false;
 
-    // Little-endian TIFF header
     uint16_t byteOrder = 0x4949; // "II"
     uint16_t magic = 42;
     uint32_t ifdOffset = 8;
-    out.write((char*)&byteOrder, 2);
-    out.write((char*)&magic, 2);
-    out.write((char*)&ifdOffset, 4);
+    fwrite(&byteOrder, 2, 1, f);
+    fwrite(&magic, 2, 1, f);
+    fwrite(&ifdOffset, 4, 1, f);
 
     uint16_t numEntries = 12;
-    out.write((char*)&numEntries, 2);
+    fwrite(&numEntries, 2, 1, f);
 
-    uint32_t dataOffset = 8 + 2 + numEntries * 12 + 4 + 16; // IFD + nextIFD(0) + extra data
-    uint32_t imageSize = width * height * 4;
+    uint32_t extraDataOffset = (uint32_t)(8 + 2 + numEntries * 12 + 4);
+    uint32_t dataOffset = extraDataOffset + 16;
+    uint32_t imageSize = (uint32_t)(width * height * 4);
 
-uint32_t extraDataOffset = static_cast<uint32_t>(8 + 2 + numEntries * 12 + 4);
+    TiffTag tags[12] = {
+        { 256, 4, 1, (uint32_t)width },
+        { 257, 4, 1, (uint32_t)height },
+        { 258, 3, 4, extraDataOffset },
+        { 259, 3, 1, 1 },
+        { 262, 3, 1, 2 },
+        { 273, 4, 1, dataOffset },
+        { 277, 3, 1, 4 },
+        { 278, 4, 1, (uint32_t)height },
+        { 279, 4, 1, imageSize },
+        { 282, 5, 1, extraDataOffset + 8 },
+        { 283, 5, 1, extraDataOffset + 8 },
+        { 296, 3, 1, 2 }
+    };
 
-std::vector<TiffTag> tags = {
-    { 256, 4, 1, static_cast<uint32_t>(width) },
-    { 257, 4, 1, static_cast<uint32_t>(height) },
-    { 258, 3, 4, extraDataOffset },
-    { 259, 3, 1, 1u },
-    { 262, 3, 1, 2u },
-    { 273, 4, 1, dataOffset },
-    { 277, 3, 1, 4u },
-    { 278, 4, 1, static_cast<uint32_t>(height) },
-    { 279, 4, 1, imageSize },
-    { 282, 5, 1, extraDataOffset + 8u },
-    { 283, 5, 1, extraDataOffset + 8u },
-    { 296, 3, 1, 2u }
-};
-
-
-    for (const auto& tag : tags) {
-        out.write((char*)&tag, sizeof(tag));
-    }
+    fwrite(tags, sizeof(TiffTag), 12, f);
     uint32_t nextIFD = 0;
-    out.write((char*)&nextIFD, 4);
+    fwrite(&nextIFD, 4, 1, f);
 
-    // Write extra payload (BitsPerSample values: 8, 8, 8, 8)
     uint16_t bps[4] = { 8, 8, 8, 8 };
-    out.write((char*)bps, 8);
-
-    // Resolution values (rational numerator / denominator)
+    fwrite(bps, 2, 4, f);
     uint32_t res[2] = { (uint32_t)dpi, 1 };
-    out.write((char*)res, 8);
+    fwrite(res, 4, 2, f);
 
-    // Reorder Cairo BGRA to TIFF RGBA
-    std::vector<unsigned char> rowBuffer(width * 4);
+    unsigned char* row = (unsigned char*)malloc(width * 4);
     for (int y = 0; y < height; ++y) {
-        const unsigned char* src = data + y * stride;
+        unsigned char* src = data + y * stride;
         for (int x = 0; x < width; ++x) {
-            rowBuffer[x * 4 + 0] = src[x * 4 + 2]; // R
-            rowBuffer[x * 4 + 1] = src[x * 4 + 1]; // G
-            rowBuffer[x * 4 + 2] = src[x * 4 + 0]; // B
-            rowBuffer[x * 4 + 3] = src[x * 4 + 3]; // A
+            row[x * 4 + 0] = src[x * 4 + 2]; // R
+            row[x * 4 + 1] = src[x * 4 + 1]; // G
+            row[x * 4 + 2] = src[x * 4 + 0]; // B
+            row[x * 4 + 3] = src[x * 4 + 3]; // A
         }
-        out.write((char*)rowBuffer.data(), width * 4);
+        fwrite(row, 1, width * 4, f);
     }
+    free(row);
+    fclose(f);
     return true;
 }
 
 // -------------------------------------------------------------
-// Application & Rendering Context
+// Multi-Layer & Annotation Engine
 // -------------------------------------------------------------
-class SVGViewerApp {
-public:
-    HWND hwnd = nullptr;
-    RsvgHandle* svg_handle = nullptr;
-    ViewState state;
-    
-    // Mouse Interaction
-    bool is_panning = false;
-    POINT last_mouse{};
+void InvalidateViewer(bool force_dirty) {
+    if (force_dirty) g_app.cache_dirty = true;
+    if (g_app.hwnd) RedrawWindow(g_app.hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
+}
 
-    // Backbuffers & Caching
-    cairo_surface_t* backbuffer_surface = nullptr;
-    cairo_surface_t* cached_surface = nullptr;
-    int backbuffer_w = 0;
-    int backbuffer_h = 0;
-    
-    // Cache tracking
-    bool cache_dirty = true;
-    double cached_pan_x = 0.0;
-    double cached_pan_y = 0.0;
-
-
-    
-    bool LoadSVG(const std::string& filepath) {
-        GError* error = nullptr;
-        RsvgHandle* new_handle = rsvg_handle_new_from_file(filepath.c_str(), &error);
-        if (!new_handle || error) {
-            if (error) g_error_free(error);
-            return false;
-        }
-    
-        if (svg_handle) {
-            g_object_unref(svg_handle);
-        }
-        svg_handle = new_handle;
-        ResetView();
-        Invalidate();
-        return true;
-    }
-
-    void ResetView() {
-        state.zoom = 1.0;
-        state.pan_x = 0.0;
-        state.pan_y = 0.0;
-        state.rotation_deg = 0.0;
-    }
-
-
-    void RenderToCairo(cairo_t* cr, double target_w, double target_h) {
-        // Clear background with white
-        cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-        cairo_paint(cr);
-
-        if (!svg_handle) return;
-
-
-
-#if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
-
-        double doc_w = 0, doc_h = 0;
-        rsvg_handle_get_intrinsic_size_in_pixels(svg_handle, &doc_w, &doc_h);
-        if (doc_w <= 0 || doc_h <= 0) { doc_w = 800; doc_h = 600; }
-
-#else
-        RsvgDimensionData dim;
-        rsvg_handle_get_dimensions(svg_handle, &dim);
-        double doc_w = (dim.width > 0) ? static_cast<double>(dim.width) : 800.0;
-        double doc_h = (dim.height > 0) ? static_cast<double>(dim.height) : 600.0;
-
-#endif
-        cairo_save(cr);
-
-        // Apply Viewport Transformations: Center -> Pan -> Rotate -> Scale
-        cairo_translate(cr, target_w / 2.0 + state.pan_x, target_h / 2.0 + state.pan_y);
-        cairo_rotate(cr, state.rotation_deg * M_PI / 180.0);
-        cairo_scale(cr, state.zoom, state.zoom);
-        cairo_translate(cr, -doc_w / 2.0, -doc_h / 2.0);
-
-
-// Auto-route based on the platform's linked library age
-#if LIBRSVG_MAJOR_VERSION > 2 || (LIBRSVG_MAJOR_VERSION == 2 && LIBRSVG_MINOR_VERSION >= 52)
-    RsvgRectangle viewport = { 0.0, 0.0, doc_w, doc_h };
-    GError* err = nullptr;
-    gboolean success = rsvg_handle_render_document(svg_handle, cr, &viewport, &err);
-    if (err) g_error_free(err);
-    
-#else
-    double rsvg_w = 0, rsvg_h = 0;
-    RsvgDimensionData dimensions;
-    rsvg_handle_get_dimensions(svg_handle, &dimensions);
-    rsvg_w = dimensions.width;
-    rsvg_h = dimensions.height;
-    
-    if (rsvg_w > 0 && rsvg_h > 0) {
-        double scale_x = doc_w / rsvg_w;
-        double scale_y = doc_h / rsvg_h;
-        double scale = std::min(scale_x, scale_y);
-        cairo_scale(cr, scale, scale);
-    }
-    gboolean success = rsvg_handle_render_cairo(svg_handle, cr);
-#endif
-        
-
-        cairo_restore(cr);
-
-        // Draw Paper Aspect Frame overlay if locked
-        if (state.lock_aspect_to_paper) {
-            PaperDimensions pd = GetPaperDimensions(state.paper_size);
-            double paper_ratio = pd.width_pt / pd.height_pt;
-            double canvas_ratio = target_w / target_h;
-
-            double frame_w = target_w, frame_h = target_h;
-            if (canvas_ratio > paper_ratio) {
-                frame_w = target_h * paper_ratio;
-            } else {
-                frame_h = target_w / paper_ratio;
+void RemoveSvgInternal(const char* svguid) {
+    for (int i = 0; i < g_app.num_layers; ++i) {
+        if (strcmp(g_app.layers[i].svguid, svguid) == 0) {
+            if (g_app.layers[i].handle) g_object_unref(g_app.layers[i].handle);
+            for (int j = i; j < g_app.num_layers - 1; ++j) {
+                g_app.layers[j] = g_app.layers[j + 1];
             }
-            double fx = (target_w - frame_w) / 2.0;
-            double fy = (target_h - frame_h) / 2.0;
-
-            cairo_set_source_rgba(cr, 0.8, 0.2, 0.2, 0.8);
-            cairo_set_line_width(cr, 2.0);
-            cairo_rectangle(cr, fx, fy, frame_w, frame_h);
-            cairo_stroke(cr);
+            g_app.num_layers--;
+            break;
         }
     }
+}
 
-    void Invalidate(bool force_dirty = true) {
-        if (force_dirty) {
-            cache_dirty = true;
-        }
-        if (hwnd) {
-            RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-        }
+bool AttachSvgData(const char* svguid, const char* data, size_t len, double x, double y, double scale, double rot) {
+    if (g_app.num_layers >= MAX_LAYERS) return false;
+    GError* error = NULL;
+    RsvgHandle* h = rsvg_handle_new_from_data((const guint8*)data, len, &error);
+    if (!h || error) {
+        if (error) g_error_free(error);
+        return false;
     }
 
-    void RenderVectorSVG(cairo_t* cr, double target_w, double target_h, double px, double py) {
-        // 1. Strict CPU Clipping: Prevents Cairo/librsvg from rasterizing off-screen paths at 20x+ zoom
+    RemoveSvgInternal(svguid);
+
+    RsvgDimensionData dim;
+    rsvg_handle_get_dimensions(h, &dim);
+
+    SvgLayer* layer = &g_app.layers[g_app.num_layers++];
+    strncpy_s(layer->svguid, sizeof(layer->svguid), svguid, _TRUNCATE);
+    layer->filepath[0] = '\0';
+    layer->handle = h;
+    layer->x = x;
+    layer->y = y;
+    layer->scale = (scale > 0.0) ? scale : 1.0;
+    layer->rotation_deg = rot;
+    layer->intrinsic_w = (dim.width > 0) ? dim.width : 100.0;
+    layer->intrinsic_h = (dim.height > 0) ? dim.height : 100.0;
+
+    InvalidateViewer(true);
+    return true;
+}
+
+bool AttachSvgFile(const char* svguid, const char* filepath, double x, double y, double scale, double rot) {
+    if (g_app.num_layers >= MAX_LAYERS) return false;
+    GError* error = NULL;
+    RsvgHandle* h = rsvg_handle_new_from_file(filepath, &error);
+    if (!h || error) {
+        if (error) g_error_free(error);
+        return false;
+    }
+
+    RemoveSvgInternal(svguid);
+
+    RsvgDimensionData dim;
+    rsvg_handle_get_dimensions(h, &dim);
+
+    SvgLayer* layer = &g_app.layers[g_app.num_layers++];
+    strncpy_s(layer->svguid, sizeof(layer->svguid), svguid, _TRUNCATE);
+    strncpy_s(layer->filepath, sizeof(layer->filepath), filepath, _TRUNCATE);
+    layer->handle = h;
+    layer->x = x;
+    layer->y = y;
+    layer->scale = (scale > 0.0) ? scale : 1.0;
+    layer->rotation_deg = rot;
+    layer->intrinsic_w = (dim.width > 0) ? dim.width : 100.0;
+    layer->intrinsic_h = (dim.height > 0) ? dim.height : 100.0;
+
+    InvalidateViewer(true);
+    return true;
+}
+
+void DrawArrow(cairo_t* cr, double from_x, double from_y, double to_x, double to_y) {
+    cairo_move_to(cr, from_x, from_y);
+    cairo_line_to(cr, to_x, to_y);
+    cairo_stroke(cr);
+
+    double angle = atan2(to_y - from_y, to_x - from_x);
+    double head_len = 10.0;
+
+    cairo_save(cr);
+    cairo_translate(cr, to_x, to_y);
+    cairo_rotate(cr, angle);
+    cairo_move_to(cr, 0, 0);
+    cairo_line_to(cr, -head_len, -head_len / 2.0);
+    cairo_line_to(cr, -head_len, head_len / 2.0);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
+void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px, double py) {
+    cairo_save(cr);
+    cairo_rectangle(cr, 0, 0, target_w, target_h);
+    cairo_clip(cr);
+
+    // Canvas Background
+    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+    cairo_paint(cr);
+
+    cairo_save(cr);
+    // Camera Transform
+    cairo_translate(cr, target_w / 2.0 + px, target_h / 2.0 + py);
+    cairo_rotate(cr, g_app.state.rotation_deg * M_PI / 180.0);
+    cairo_scale(cr, g_app.state.zoom, g_app.state.zoom);
+
+    // 1. Render SVG Layers
+    for (int i = 0; i < g_app.num_layers; ++i) {
+        SvgLayer* l = &g_app.layers[i];
+        if (!l->handle) continue;
         cairo_save(cr);
-        cairo_rectangle(cr, 0, 0, target_w, target_h);
-        cairo_clip(cr);
-
-        cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
-        cairo_paint(cr);
-
-        if (svg_handle) {
-            RsvgDimensionData dim;
-            rsvg_handle_get_dimensions(svg_handle, &dim);
-            double doc_w = (dim.width > 0) ? (double)dim.width : 800.0;
-            double doc_h = (dim.height > 0) ? (double)dim.height : 600.0;
-
-            cairo_save(cr);
-            // Apply transformations
-            cairo_translate(cr, target_w / 2.0 + px, target_h / 2.0 + py);
-            cairo_rotate(cr, state.rotation_deg * M_PI / 180.0);
-            cairo_scale(cr, state.zoom, state.zoom);
-            cairo_translate(cr, -doc_w / 2.0, -doc_h / 2.0);
-
-            rsvg_handle_render_cairo(svg_handle, cr);
-            cairo_restore(cr);
-        }
-        cairo_restore(cr); // restore clip
+        cairo_translate(cr, l->x, l->y);
+        cairo_rotate(cr, l->rotation_deg * M_PI / 180.0);
+        cairo_scale(cr, l->scale, l->scale);
+        rsvg_handle_render_cairo(l->handle, cr);
+        cairo_restore(cr);
     }
 
-    void Paint(HDC hdc, RECT rc) {
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-        if (w <= 0 || h <= 0) return;
+    // 2. Render Annotations
+    for (int i = 0; i < g_app.num_annotations; ++i) {
+        Annotation* a = &g_app.annotations[i];
+        cairo_save(cr);
 
-        // Reallocate surfaces on resize
-        if (!backbuffer_surface || backbuffer_w != w || backbuffer_h != h) {
-            if (backbuffer_surface) cairo_surface_destroy(backbuffer_surface);
-            if (cached_surface) cairo_surface_destroy(cached_surface);
-            
-            backbuffer_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            cached_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            backbuffer_w = w;
-            backbuffer_h = h;
-            cache_dirty = true;
+        cairo_select_font_face(cr, "Segoe UI", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 14.0);
+
+        if (a->type == ANNOT_POINT_TEXT) {
+            cairo_set_source_rgba(cr, 0.9, 0.1, 0.1, 1.0);
+            cairo_arc(cr, a->x, a->y, 4.0, 0, 2 * M_PI);
+            cairo_fill(cr);
+            cairo_move_to(cr, a->x + 8.0, a->y + 5.0);
+            cairo_show_text(cr, a->text);
+        } else if (a->type == ANNOT_RECT_TEXT) {
+            cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.2);
+            cairo_rectangle(cr, a->x, a->y, a->w, a->h);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.9);
+            cairo_set_line_width(cr, 1.5);
+            cairo_stroke(cr);
+            cairo_move_to(cr, a->x + 5.0, a->y + 18.0);
+            cairo_show_text(cr, a->text);
+        } else if (a->type == ANNOT_POLYGON && a->num_points >= 3) {
+            cairo_set_source_rgba(cr, 0.1, 0.8, 0.3, 0.2);
+            cairo_move_to(cr, a->poly_points[0].x, a->poly_points[0].y);
+            for (int p = 1; p < a->num_points; ++p) {
+                cairo_line_to(cr, a->poly_points[p].x, a->poly_points[p].y);
+            }
+            cairo_close_path(cr);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, 0.1, 0.8, 0.3, 0.9);
+            cairo_set_line_width(cr, 1.5);
+            cairo_stroke(cr);
+            cairo_move_to(cr, a->poly_points[0].x + 5.0, a->poly_points[0].y + 18.0);
+            cairo_show_text(cr, a->text);
+        } else if (a->type == ANNOT_ARROW) {
+            cairo_set_source_rgba(cr, 0.8, 0.2, 0.8, 0.9);
+            cairo_set_line_width(cr, 2.0);
+            DrawArrow(cr, a->x, a->y, a->arrow_tip_x, a->arrow_tip_y);
+            cairo_move_to(cr, a->x - 10.0, a->y - 8.0);
+            cairo_show_text(cr, a->text);
         }
-
-        // Full vector re-render when cache is invalidated
-        if (cache_dirty) {
-            cairo_t* ccr = cairo_create(cached_surface);
-            RenderVectorSVG(ccr, w, h, state.pan_x, state.pan_y);
-            cairo_destroy(ccr);
-            cairo_surface_flush(cached_surface);
-
-            cached_pan_x = state.pan_x;
-            cached_pan_y = state.pan_y;
-            cache_dirty = false;
-        }
-
-        // Fast Paint: Copy cached raster to screen backbuffer (offset by pan delta during drag)
-        cairo_t* bcr = cairo_create(backbuffer_surface);
-        cairo_set_source_rgb(bcr, 0.9, 0.9, 0.9); // background for out-of-bounds drag
-        cairo_paint(bcr);
-
-        double dx = state.pan_x - cached_pan_x;
-        double dy = state.pan_y - cached_pan_y;
-
-        cairo_set_source_surface(bcr, cached_surface, dx, dy);
-        cairo_paint(bcr);
-
-        // Draw Paper Aspect Frame overlay if enabled
-        if (state.lock_aspect_to_paper) {
-            PaperDimensions pd = GetPaperDimensions(state.paper_size);
-            double paper_ratio = pd.width_pt / pd.height_pt;
-            double canvas_ratio = (double)w / (double)h;
-            double frame_w = (canvas_ratio > paper_ratio) ? (h * paper_ratio) : w;
-            double frame_h = (canvas_ratio > paper_ratio) ? h : (w / paper_ratio);
-            double fx = (w - frame_w) / 2.0;
-            double fy = (h - frame_h) / 2.0;
-
-            cairo_set_source_rgba(bcr, 0.85, 0.15, 0.15, 0.85);
-            cairo_set_line_width(bcr, 2.0);
-            cairo_rectangle(bcr, fx, fy, frame_w, frame_h);
-            cairo_stroke(bcr);
-        }
-
-        cairo_destroy(bcr);
-        cairo_surface_flush(backbuffer_surface);
-
-        // Blit to Win32 Device Context
-        unsigned char* data = cairo_image_surface_get_data(backbuffer_surface);
-        BITMAPINFO bmi = {};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h, data, &bmi, DIB_RGB_COLORS);
+        cairo_restore(cr);
     }
 
-    // Export Options
-    void ExportRaster(const std::wstring& path, bool is_tiff) {
-        PaperDimensions pd = GetPaperDimensions(state.paper_size);
-        int out_w = 0, out_h = 0;
+    cairo_restore(cr);
+    cairo_restore(cr);
+}
 
-        if (state.lock_aspect_to_paper) {
-            out_w = static_cast<int>(std::round((pd.width_pt / 72.0) * state.export_dpi));
-            out_h = static_cast<int>(std::round((pd.height_pt / 72.0) * state.export_dpi));
-        } else {
-            out_w = backbuffer_w * (state.export_dpi / 96);
-            out_h = backbuffer_h * (state.export_dpi / 96);
+// -------------------------------------------------------------
+// Annotation Persistence (-svgAnnotV0.json)
+// -------------------------------------------------------------
+void GetSidecarAnnotationPath(const char* svg_path, char* out_annot_path, size_t max_len) {
+    strncpy_s(out_annot_path, max_len, svg_path, _TRUNCATE);
+    char* dot = strrchr(out_annot_path, '.');
+    if (dot) *dot = '\0';
+    strncat_s(out_annot_path, max_len, "-svgAnnotV0.json", _TRUNCATE);
+}
+
+bool SaveAnnotationsJSON(const char* filepath) {
+    FILE* f = fopen(filepath, "w");
+    if (!f) return false;
+
+    fprintf(f, "{\n  \"version\": \"svgAnnotV0\",\n  \"annotations\": [\n");
+    for (int i = 0; i < g_app.num_annotations; ++i) {
+        Annotation* a = &g_app.annotations[i];
+        fprintf(f, "    {\n      \"id\": \"%s\",\n      \"type\": %d,\n      \"text\": \"%s\",\n", a->id, a->type, a->text);
+        fprintf(f, "      \"x\": %f, \"y\": %f, \"w\": %f, \"h\": %f,\n", a->x, a->y, a->w, a->h);
+        fprintf(f, "      \"arrow_tip_x\": %f, \"arrow_tip_y\": %f,\n", a->arrow_tip_x, a->arrow_tip_y);
+        fprintf(f, "      \"num_points\": %d,\n      \"points\": [", a->num_points);
+        for (int p = 0; p < a->num_points; ++p) {
+            fprintf(f, "[%f,%f]%s", a->poly_points[p].x, a->poly_points[p].y, (p + 1 < a->num_points) ? "," : "");
         }
+        fprintf(f, "]\n    }%s\n", (i + 1 < g_app.num_annotations) ? "," : "");
+    }
+    fprintf(f, "  ]\n}\n");
+    fclose(f);
+    return true;
+}
 
+bool LoadAnnotationsJSON(const char* filepath) {
+    FILE* f = fopen(filepath, "r");
+    if (!f) return false;
+
+    char buffer[4096];
+    g_app.num_annotations = 0;
+
+    Annotation current = { 0 };
+    bool in_annot = false;
+
+    while (fgets(buffer, sizeof(buffer), f)) {
+        if (strstr(buffer, "\"id\":")) {
+            in_annot = true;
+            memset(&current, 0, sizeof(Annotation));
+            sscanf_s(buffer, "%*[^:] : \"%[^\"]\"", current.id, (unsigned)sizeof(current.id));
+        } else if (strstr(buffer, "\"type\":")) {
+            int t = 0;
+            sscanf_s(buffer, "%*[^:] : %d", &t);
+            current.type = (AnnotType)t;
+        } else if (strstr(buffer, "\"text\":")) {
+            sscanf_s(buffer, "%*[^:] : \"%[^\"]\"", current.text, (unsigned)sizeof(current.text));
+        } else if (strstr(buffer, "\"x\":")) {
+            float x, y, w, h;
+            sscanf_s(buffer, "%*[^:] : %f , \"y\" : %f , \"w\" : %f , \"h\" : %f", &x, &y, &w, &h);
+            current.x = x; current.y = y; current.w = w; current.h = h;
+        } else if (strstr(buffer, "\"arrow_tip_x\":")) {
+            float ax, ay;
+            sscanf_s(buffer, "%*[^:] : %f , \"arrow_tip_y\" : %f", &ax, &ay);
+            current.arrow_tip_x = ax; current.arrow_tip_y = ay;
+        } else if (strstr(buffer, "\"num_points\":")) {
+            sscanf_s(buffer, "%*[^:] : %d", &current.num_points);
+        } else if (strstr(buffer, "}") && in_annot) {
+            if (g_app.num_annotations < MAX_ANNOTATIONS) {
+                g_app.annotations[g_app.num_annotations++] = current;
+            }
+            in_annot = false;
+        }
+    }
+
+    fclose(f);
+    InvalidateViewer(true);
+    return true;
+}
+
+// -------------------------------------------------------------
+// Exporters Execution
+// -------------------------------------------------------------
+void TriggerExport(const wchar_t* path, int fmt) {
+    PaperDimensions pd = GetPaperDimensions(g_app.state.paper_size);
+    int out_w = 0, out_h = 0;
+
+    if (g_app.state.lock_aspect_to_paper) {
+        out_w = (int)round((pd.width_pt / 72.0) * g_app.state.export_dpi);
+        out_h = (int)round((pd.height_pt / 72.0) * g_app.state.export_dpi);
+    } else {
+        out_w = g_app.backbuffer_w * (g_app.state.export_dpi / 96);
+        out_h = g_app.backbuffer_h * (g_app.state.export_dpi / 96);
+    }
+
+    if (fmt == IDM_FILE_EXPORT_PDF) {
+        char mbPath[MAX_PATH];
+        wcstombs(mbPath, path, MAX_PATH);
+        double pdf_w = g_app.state.lock_aspect_to_paper ? pd.width_pt : (double)g_app.backbuffer_w;
+        double pdf_h = g_app.state.lock_aspect_to_paper ? pd.height_pt : (double)g_app.backbuffer_h;
+        cairo_surface_t* pdf_surface = cairo_pdf_surface_create(mbPath, pdf_w, pdf_h);
+        cairo_t* cr = cairo_create(pdf_surface);
+        RenderVectorCanvas(cr, pdf_w, pdf_h, g_app.state.pan_x, g_app.state.pan_y);
+        cairo_show_page(cr);
+        cairo_destroy(cr);
+        cairo_surface_destroy(pdf_surface);
+    } else {
         cairo_surface_t* exp_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, out_w, out_h);
         cairo_t* cr = cairo_create(exp_surface);
-        RenderToCairo(cr, out_w, out_h);
+        RenderVectorCanvas(cr, out_w, out_h, g_app.state.pan_x, g_app.state.pan_y);
         cairo_destroy(cr);
         cairo_surface_flush(exp_surface);
 
-        if (is_tiff) {
-            SaveCairoSurfaceToTIFF(exp_surface, path, state.export_dpi);
-        } else {
+        if (fmt == IDM_FILE_EXPORT_BMP) {
             SaveCairoSurfaceToBMP(exp_surface, path);
+        } else if (fmt == IDM_FILE_EXPORT_TIFF) {
+            SaveCairoSurfaceToTIFF(exp_surface, path, g_app.state.export_dpi);
         }
         cairo_surface_destroy(exp_surface);
     }
-
-    void ExportPDF(const std::string& path) {
-        PaperDimensions pd = GetPaperDimensions(state.paper_size);
-        double pdf_w = state.lock_aspect_to_paper ? pd.width_pt : (double)backbuffer_w;
-        double pdf_h = state.lock_aspect_to_paper ? pd.height_pt : (double)backbuffer_h;
-
-        cairo_surface_t* pdf_surface = cairo_pdf_surface_create(path.c_str(), pdf_w, pdf_h);
-        cairo_t* cr = cairo_create(pdf_surface);
-        RenderToCairo(cr, pdf_w, pdf_h);
-        cairo_show_page(cr);
-        cairo_destroy(cr);
-        cairo_surface_flush(pdf_surface);
-        cairo_surface_destroy(pdf_surface);
-    }
-};
-
-static SVGViewerApp g_app;
+}
 
 // -------------------------------------------------------------
-// Named Pipe JSON-RPC Server
+// Menus & Context Menu Dispatcher
 // -------------------------------------------------------------
-std::string ExecuteRPCCommand(const std::string& line) {
-    // Minimal JSON parsing without heavy dependencies
-    std::istringstream iss(line);
-    std::string key;
+void CreateApplicationMenu(HWND hwnd) {
+    HMENU hMenuBar = CreateMenu();
+    
+    // File Menu
+    HMENU hFile = CreatePopupMenu();
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open Root SVG...\tCtrl+O");
+    AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXPORT_BMP, L"Export to &BMP...");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXPORT_TIFF, L"Export to &TIFF...");
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXPORT_PDF, L"Export to &PDF...");
+    AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tAlt+F4");
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
 
-        
-    if (line.find("\"get_viewport\"") != std::string::npos || line.find("\"get-viewport\"") != std::string::npos) {
-        const char* paper_str = "Custom";
-        if (g_app.state.paper_size == PAPER_A4) paper_str = "A4";
-        else if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
-        else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
-    
-        std::ostringstream json;
-        json << "{"
-             << "\"status\":\"ok\","
-             << "\"viewport\":{"
-             << "\"zoom\":" << g_app.state.zoom << ","
-             << "\"pan_x\":" << g_app.state.pan_x << ","
-             << "\"pan_y\":" << g_app.state.pan_y << ","
-             << "\"rotation_deg\":" << g_app.state.rotation_deg << ","
-             << "\"aspect_locked\":" << (g_app.state.lock_aspect_to_paper ? "true" : "false") << ","
-             << "\"paper_size\":\"" << paper_str << "\","
-             << "\"export_dpi\":" << g_app.state.export_dpi << ","
-             << "\"canvas_width\":" << g_app.backbuffer_w << ","
-             << "\"canvas_height\":" << g_app.backbuffer_h
-             << "}}\n";
-        return json.str();
-    }
-    else if (line.find("\"load\"") != std::string::npos) {
-        size_t file_key = line.find("\"file\"");
-        if (file_key != std::string::npos) {
-            size_t colon = line.find(':', file_key);
-            size_t first_quote = line.find('\"', colon);
-            size_t second_quote = line.find('\"', first_quote + 1);
-    
-            if (first_quote != std::string::npos && second_quote != std::string::npos) {
-                std::string file_path = line.substr(first_quote + 1, second_quote - first_quote - 1);
-                if (g_app.LoadSVG(file_path)) {
-                    return "{\"status\":\"ok\",\"result\":\"loaded\"}\n";
-                } else {
-                    return "{\"status\":\"error\",\"message\":\"failed to load SVG file\"}\n";
+    // View Menu
+    HMENU hView = CreatePopupMenu();
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_IN, L"Zoom &In (+)");
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, L"Zoom &Out (-)");
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_RESET, L"&Reset View (0)");
+    AppendMenuW(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ROTATE_CW, L"Rotate 90° &CW (R)");
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_ROTATE_CCW, L"Rotate 90° CC&W");
+    AppendMenuW(hView, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hView, MF_STRING, IDM_VIEW_TOGGLE_ASPECT, L"Lock Aspect to Paper Size (P)");
+    HMENU hPaper = CreatePopupMenu();
+    AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_A4, L"A4 (210 x 297 mm)");
+    AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_A3, L"A3 (297 x 420 mm)");
+    AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_LETTER, L"US Letter (8.5 x 11 in)");
+    AppendMenuW(hView, MF_POPUP, (UINT_PTR)hPaper, L"Paper Size");
+    HMENU hDpi = CreatePopupMenu();
+    AppendMenuW(hDpi, MF_STRING, IDM_VIEW_DPI_150, L"150 DPI");
+    AppendMenuW(hDpi, MF_STRING, IDM_VIEW_DPI_300, L"300 DPI");
+    AppendMenuW(hDpi, MF_STRING, IDM_VIEW_DPI_600, L"600 DPI");
+    AppendMenuW(hView, MF_POPUP, (UINT_PTR)hDpi, L"Export DPI");
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hView, L"&View");
+
+    // Layers Menu
+    HMENU hLayers = CreatePopupMenu();
+    AppendMenuW(hLayers, MF_STRING, IDM_LAYER_ATTACH_FILE, L"&Attach SVG Layer from File...");
+    AppendMenuW(hLayers, MF_STRING, IDM_LAYER_CLEAR_ALL, L"&Clear All Overlays");
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hLayers, L"&Layers");
+
+    // Annotations Menu
+    HMENU hAnnot = CreatePopupMenu();
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POINT, L"Add Point Marker Text");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_RECT, L"Add Box Area Text");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POLY, L"Add Polygon Highlight Area");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_ARROW, L"Add Arrow Callout");
+    AppendMenuW(hAnnot, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_SAVE, L"&Save Sidecar Annotations (-svgAnnotV0.json)");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_LOAD, L"&Load Sidecar Annotations");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_CLEAR, L"Clear All Annotations");
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hAnnot, L"&Annotations");
+
+    // Named Pipe IPC Menu
+    HMENU hPipe = CreatePopupMenu();
+    AppendMenuW(hPipe, MF_STRING, IDM_PIPE_TOGGLE, L"&Toggle Named Pipe Server");
+    AppendMenuW(hPipe, MF_STRING, IDM_PIPE_RENAME, L"&Configure Pipe Name...");
+    AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hPipe, L"&IPC Server");
+
+    SetMenu(hwnd, hMenuBar);
+}
+
+void HandleContextMenu(HWND hwnd, int mx, int my) {
+    EnterCriticalSection(&g_app.cs);
+    double wx = 0.0, wy = 0.0;
+    ScreenToWorld(mx, my, &wx, &wy);
+
+    // 1. Check Hit Test Areas
+    for (int i = g_app.num_hit_areas - 1; i >= 0; --i) {
+        HitTestArea* h = &g_app.hit_areas[i];
+        double tx = wx, ty = wy;
+        if (h->svguid[0] != '\0') {
+            for (int l = 0; l < g_app.num_layers; ++l) {
+                if (strcmp(g_app.layers[l].svguid, h->svguid) == 0) {
+                    tx -= g_app.layers[l].x;
+                    ty -= g_app.layers[l].y;
+                    break;
                 }
             }
         }
-        return "{\"status\":\"error\",\"message\":\"invalid file path\"}\n";
+        if (tx >= h->x && tx <= (h->x + h->w) && ty >= h->y && ty <= (h->y + h->h)) {
+            HMENU hMenu = CreatePopupMenu();
+            for (int c = 0; c < h->num_commands; ++c) {
+                wchar_t wcmd[64];
+                mbstowcs(wcmd, h->commands[c], 64);
+                AppendMenuW(hMenu, MF_STRING, IDM_CTX_HITTEST_BASE + c, wcmd);
+            }
+            POINT pt = { mx, my };
+            ClientToScreen(hwnd, &pt);
+            LeaveCriticalSection(&g_app.cs);
+
+            int chosen = TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(hMenu);
+
+            if (chosen >= IDM_CTX_HITTEST_BASE) {
+                EnterCriticalSection(&g_app.cs);
+                int idx = chosen - IDM_CTX_HITTEST_BASE;
+                if (g_app.num_events < MAX_EVENT_QUEUE) {
+                    ContextMenuEvent* ev = &g_app.event_queue[g_app.num_events++];
+                    strncpy_s(ev->hittest_uid, sizeof(ev->hittest_uid), h->hittest_uid, _TRUNCATE);
+                    strncpy_s(ev->command, sizeof(ev->command), h->commands[idx], _TRUNCATE);
+                }
+                LeaveCriticalSection(&g_app.cs);
+            }
+            return;
+        }
     }
-    
-    else if (line.find("\"zoom\"") != std::string::npos) {
-        float factor = 1.0f;
-        sscanf_s(line.c_str(), "%*[^0-9.-]%f", &factor);
-        g_app.state.zoom *= factor;
-        g_app.Invalidate();
-        return "{\"status\":\"ok\",\"zoom\":" + std::to_string(g_app.state.zoom) + "}\n";
-    } else if (line.find("\"rotate\"") != std::string::npos) {
-        float deg = 0.0f;
-        sscanf_s(line.c_str(), "%*[^0-9.-]%f", &deg);
-        g_app.state.rotation_deg += deg;
-        g_app.Invalidate();
-        return "{\"status\":\"ok\",\"rotation\":" + std::to_string(g_app.state.rotation_deg) + "}\n";
-    } else if (line.find("\"pan\"") != std::string::npos) {
-        float dx = 0, dy = 0;
-        size_t idx = line.find("\"pan\"");
-        sscanf_s(line.c_str() + idx, "%*[^0-9.-]%f%*[^0-9.-]%f", &dx, &dy);
-        g_app.state.pan_x += dx;
-        g_app.state.pan_y += dy;
-        g_app.Invalidate();
-        return "{\"status\":\"ok\"}\n";
+
+    // 2. Default Canvas Context Menu
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ATTACH_HERE, L"Attach SVG File Here...");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_POINT_HERE, L"Add Point Text Annotation Here");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_RECT_HERE, L"Add Box Text Annotation Here");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_ARROW_HERE, L"Add Arrow Callout Here");
+
+    POINT pt = { mx, my };
+    ClientToScreen(hwnd, &pt);
+    LeaveCriticalSection(&g_app.cs);
+
+    int cmd = TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+    DestroyMenu(hMenu);
+
+    if (cmd == IDM_CTX_ATTACH_HERE) {
+        OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
+        wchar_t szFile[MAX_PATH] = { 0 };
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter = L"SVG Files (*.svg)\0*.svg\0All Files (*.*)\0*.*\0";
+        ofn.lpstrFile = szFile;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameW(&ofn)) {
+            char mbFile[MAX_PATH];
+            wcstombs(mbFile, szFile, MAX_PATH);
+            char uid[64];
+            snprintf(uid, sizeof(uid), "layer_%d", g_app.num_layers + 1);
+            AttachSvgFile(uid, mbFile, wx, wy, 1.0, 0.0);
+        }
+    } else if (cmd == IDM_CTX_ANNOT_POINT_HERE) {
+        if (g_app.num_annotations < MAX_ANNOTATIONS) {
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            snprintf(a->id, sizeof(a->id), "annot_%d", g_app.num_annotations);
+            a->type = ANNOT_POINT_TEXT;
+            a->x = wx; a->y = wy;
+            strncpy_s(a->text, sizeof(a->text), "Point Annotation", _TRUNCATE);
+            InvalidateViewer(true);
+        }
+    } else if (cmd == IDM_CTX_ANNOT_RECT_HERE) {
+        if (g_app.num_annotations < MAX_ANNOTATIONS) {
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            snprintf(a->id, sizeof(a->id), "annot_%d", g_app.num_annotations);
+            a->type = ANNOT_RECT_TEXT;
+            a->x = wx; a->y = wy; a->w = 120; a->h = 60;
+            strncpy_s(a->text, sizeof(a->text), "Box Area", _TRUNCATE);
+            InvalidateViewer(true);
+        }
+    } else if (cmd == IDM_CTX_ANNOT_ARROW_HERE) {
+        if (g_app.num_annotations < MAX_ANNOTATIONS) {
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            snprintf(a->id, sizeof(a->id), "annot_%d", g_app.num_annotations);
+            a->type = ANNOT_ARROW;
+            a->x = wx; a->y = wy;
+            a->arrow_tip_x = wx + 50; a->arrow_tip_y = wy - 50;
+            strncpy_s(a->text, sizeof(a->text), "Callout", _TRUNCATE);
+            InvalidateViewer(true);
+        }
     }
-    return "{\"status\":\"error\",\"message\":\"unknown command\"}\n";
 }
 
-void StartNamedPipeServer(std::atomic<bool>& running) {
-    while (running) {
-        
-HANDLE hPipe = CreateNamedPipeW(
-    PIPE_NAME,
-    PIPE_ACCESS_DUPLEX,
-    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-    1,                  // nMaxInstances
-    4096,               // nOutBufferSize
-    4096,               // nInBufferSize
-    0,                  // nDefaultTimeOut
-    NULL                // lpSecurityAttributes
-);
+// -------------------------------------------------------------
+// JSON-RPC Command Dispatcher
+// -------------------------------------------------------------
+void ExecuteRPC(const char* line, char* response, size_t max_resp) {
+    EnterCriticalSection(&g_app.cs);
+
+    auto extract_str = [&](const char* key, char* out, size_t max_len) -> bool {
+        char pattern[64];
+        snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+        const char* k = strstr(line, pattern);
+        if (!k) return false;
+        const char* colon = strchr(k, ':');
+        if (!colon) return false;
+        const char* q1 = strchr(colon, '\"');
+        if (!q1) return false;
+        const char* q2 = strchr(q1 + 1, '\"');
+        if (!q2) return false;
+        size_t len = q2 - q1 - 1;
+        if (len >= max_len) len = max_len - 1;
+        strncpy_s(out, max_len, q1 + 1, len);
+        out[len] = '\0';
+        return true;
+    };
+
+    auto extract_num = [&](const char* key, double def) -> double {
+        char pattern[64];
+        snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+        const char* k = strstr(line, pattern);
+        if (!k) return def;
+        float val = (float)def;
+        sscanf_s(k, "%*[^0-9.-]%f", &val);
+        return (double)val;
+    };
+
+    if (strstr(line, "\"load_svg_string\"")) {
+        char svguid[64] = "layer_default";
+        char svg_str[8192] = { 0 };
+        extract_str("svguid", svguid, sizeof(svguid));
+        extract_str("svg_str", svg_str, sizeof(svg_str));
+        double x = extract_num("x", 0.0);
+        double y = extract_num("y", 0.0);
+        double scale = extract_num("scale", 1.0);
+        double rot = extract_num("rotation", 0.0);
+        if (AttachSvgData(svguid, svg_str, strlen(svg_str), x, y, scale, rot)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"svguid\":\"%s\"}\n", svguid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"parse failed\"}\n");
+        }
+    } else if (strstr(line, "\"remove_svg\"")) {
+        char svguid[64] = { 0 };
+        extract_str("svguid", svguid, sizeof(svguid));
+        RemoveSvgInternal(svguid);
+        InvalidateViewer(true);
+        snprintf(response, max_resp, "{\"status\":\"ok\",\"removed\":\"%s\"}\n", svguid);
+    } else if (strstr(line, "\"add_hit_test\"")) {
+        if (g_app.num_hit_areas < MAX_HITTESTS) {
+            HitTestArea* h = &g_app.hit_areas[g_app.num_hit_areas++];
+            memset(h, 0, sizeof(HitTestArea));
+            extract_str("hittest_uid", h->hittest_uid, sizeof(h->hittest_uid));
+            extract_str("svguid", h->svguid, sizeof(h->svguid));
+            const char* r = strstr(line, "\"rect\"");
+            if (r) {
+                float rx, ry, rw, rh;
+                sscanf_s(r, "%*[^0-9.-]%f%*[^0-9.-]%f%*[^0-9.-]%f%*[^0-9.-]%f", &rx, &ry, &rw, &rh);
+                h->x = rx; h->y = ry; h->w = rw; h->h = rh;
+            }
+            const char* cmd = strstr(line, "\"context_menu_commands\"");
+            if (cmd) {
+                const char* start = strchr(cmd, '[');
+                const char* end = strchr(cmd, ']');
+                if (start && end && start < end) {
+                    const char* cur = start;
+                    while ((cur = strchr(cur, '\"')) && cur < end) {
+                        const char* q2 = strchr(cur + 1, '\"');
+                        if (!q2 || q2 > end) break;
+                        size_t l = q2 - cur - 1;
+                        if (h->num_commands < 8) {
+                            strncpy_s(h->commands[h->num_commands], 64, cur + 1, l);
+                            h->commands[h->num_commands][l] = '\0';
+                            h->num_commands++;
+                        }
+                        cur = q2 + 1;
+                    }
+                }
+            }
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"hittest_uid\":\"%s\"}\n", h->hittest_uid);
+        }
+    } else if (strstr(line, "\"drain_context_menu_command_queue\"")) {
+        char buf[2048] = "{\"status\":\"ok\",\"events\":[";
+        for (int i = 0; i < g_app.num_events; ++i) {
+            char entry[256];
+            snprintf(entry, sizeof(entry), "{\"hittest_uid\":\"%s\",\"command\":\"%s\"}%s", 
+                g_app.event_queue[i].hittest_uid, g_app.event_queue[i].command, 
+                (i + 1 < g_app.num_events) ? "," : "");
+            strncat_s(buf, sizeof(buf), entry, _TRUNCATE);
+        }
+        strncat_s(buf, sizeof(buf), "]}\n", _TRUNCATE);
+        g_app.num_events = 0;
+        strncpy_s(response, max_resp, buf, _TRUNCATE);
+    } else if (strstr(line, "\"get_viewport\"")) {
+        const char* paper_str = "A4";
+        if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
+        else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
+        else if (g_app.state.paper_size == PAPER_CUSTOM) paper_str = "Custom";
+
+        snprintf(response, max_resp, 
+            "{\"status\":\"ok\",\"viewport\":{\"zoom\":%f,\"pan_x\":%f,\"pan_y\":%f,\"rotation_deg\":%f,"
+            "\"aspect_locked\":%s,\"export_paper_size\":\"%s\",\"export_dpi\":%d,"
+            "\"canvas_width\":%d,\"canvas_height\":%d}}\n",
+            g_app.state.zoom, g_app.state.pan_x, g_app.state.pan_y, g_app.state.rotation_deg,
+            g_app.state.lock_aspect_to_paper ? "true" : "false", paper_str, g_app.state.export_dpi,
+            g_app.backbuffer_w, g_app.backbuffer_h);
+    } else if (strstr(line, "\"save_annotations\"")) {
+        char path[MAX_PATH] = { 0 };
+        extract_str("filepath", path, sizeof(path));
+        if (path[0] == '\0') GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+        if (SaveAnnotationsJSON(path)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"path\":\"%s\"}\n", path);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"save failed\"}\n");
+        }
+    } else if (strstr(line, "\"load_annotations\"")) {
+        char path[MAX_PATH] = { 0 };
+        extract_str("filepath", path, sizeof(path));
+        if (path[0] == '\0') GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+        if (LoadAnnotationsJSON(path)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"loaded\":%d}\n", g_app.num_annotations);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"load failed\"}\n");
+        }
+    } else {
+        snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"unknown rpc command\"}\n");
+    }
+
+    LeaveCriticalSection(&g_app.cs);
+}
+
+// -------------------------------------------------------------
+// Named Pipe Worker Thread
+// -------------------------------------------------------------
+DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
+    while (InterlockedCompareExchange(&g_app.rpc_running, 1, 1)) {
+        if (!InterlockedCompareExchange(&g_app.pipe_enabled, 1, 1)) {
+            Sleep(250);
+            continue;
+        }
+
+        HANDLE hPipe = CreateNamedPipeW(
+            g_app.pipe_name,
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+            1, 4096, 4096, 0, NULL
+        );
 
         if (hPipe == INVALID_HANDLE_VALUE) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            Sleep(200);
             continue;
         }
 
         BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-        if (connected) {
-            char buffer[2048];
+        if (connected && InterlockedCompareExchange(&g_app.rpc_running, 1, 1)) {
+            char in_buffer[4096];
             DWORD bytesRead = 0;
-            while (running && ReadFile(hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
-                buffer[bytesRead] = '\0';
-                std::string response = ExecuteRPCCommand(buffer);
+            while (ReadFile(hPipe, in_buffer, sizeof(in_buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+                in_buffer[bytesRead] = '\0';
+                char out_response[4096] = { 0 };
+                ExecuteRPC(in_buffer, out_response, sizeof(out_response));
                 DWORD written = 0;
-                WriteFile(hPipe, response.c_str(), static_cast<DWORD>(response.length()), &written, NULL);
+                WriteFile(hPipe, out_response, (DWORD)strlen(out_response), &written, NULL);
             }
         }
         DisconnectNamedPipe(hPipe);
         CloseHandle(hPipe);
     }
+    return 0;
 }
 
 // -------------------------------------------------------------
-// Win32 Window Procedure
+// Window Procedure
 // -------------------------------------------------------------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        switch (id) {
+        case IDM_FILE_OPEN: {
+            OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
+            wchar_t szFile[MAX_PATH] = { 0 };
+            ofn.hwndOwner = hwnd;
+            ofn.lpstrFilter = L"SVG Files (*.svg)\0*.svg\0All Files (*.*)\0*.*\0";
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameW(&ofn)) {
+                EnterCriticalSection(&g_app.cs);
+                wcstombs(g_app.root_svg_path, szFile, MAX_PATH);
+                for (int i = 0; i < g_app.num_layers; ++i) {
+                    if (g_app.layers[i].handle) g_object_unref(g_app.layers[i].handle);
+                }
+                g_app.num_layers = 0;
+                AttachSvgFile("root", g_app.root_svg_path, 0, 0, 1.0, 0.0);
+                
+                // Auto load sidecar annotation if exists
+                char sidecar[MAX_PATH];
+                GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
+                LoadAnnotationsJSON(sidecar);
+
+                LeaveCriticalSection(&g_app.cs);
+            }
+            break;
+        }
+        case IDM_FILE_EXPORT_BMP:
+        case IDM_FILE_EXPORT_TIFF:
+        case IDM_FILE_EXPORT_PDF: {
+            OPENFILENAMEW ofn = { sizeof(OPENFILENAMEW) };
+            wchar_t szFile[MAX_PATH] = { 0 };
+            ofn.hwndOwner = hwnd;
+            if (id == IDM_FILE_EXPORT_BMP) ofn.lpstrFilter = L"BMP Image (*.bmp)\0*.bmp\0";
+            else if (id == IDM_FILE_EXPORT_TIFF) ofn.lpstrFilter = L"TIFF Image (*.tiff)\0*.tiff\0";
+            else ofn.lpstrFilter = L"PDF Document (*.pdf)\0*.pdf\0";
+            ofn.lpstrFile = szFile;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_OVERWRITEPROMPT;
+            if (GetSaveFileNameW(&ofn)) {
+                TriggerExport(szFile, id);
+                MessageBoxW(hwnd, L"Export completed successfully.", L"Export", MB_OK | MB_ICONINFORMATION);
+            }
+            break;
+        }
+        case IDM_VIEW_ZOOM_IN:  g_app.state.zoom *= 1.25; InvalidateViewer(true); break;
+        case IDM_VIEW_ZOOM_OUT: g_app.state.zoom *= 0.8;  InvalidateViewer(true); break;
+        case IDM_VIEW_RESET:    g_app.state.zoom = 1.0; g_app.state.pan_x = 0; g_app.state.pan_y = 0; InvalidateViewer(true); break;
+        case IDM_VIEW_ROTATE_CW: g_app.state.rotation_deg = fmod(g_app.state.rotation_deg + 90.0, 360.0); InvalidateViewer(true); break;
+        case IDM_VIEW_ROTATE_CCW: g_app.state.rotation_deg = fmod(g_app.state.rotation_deg - 90.0 + 360.0, 360.0); InvalidateViewer(true); break;
+        case IDM_VIEW_TOGGLE_ASPECT: g_app.state.lock_aspect_to_paper = !g_app.state.lock_aspect_to_paper; InvalidateViewer(true); break;
+        case IDM_VIEW_PAPER_A4: g_app.state.paper_size = PAPER_A4; InvalidateViewer(true); break;
+        case IDM_VIEW_PAPER_A3: g_app.state.paper_size = PAPER_A3; InvalidateViewer(true); break;
+        case IDM_VIEW_PAPER_LETTER: g_app.state.paper_size = PAPER_LETTER; InvalidateViewer(true); break;
+        case IDM_VIEW_DPI_150: g_app.state.export_dpi = 150; break;
+        case IDM_VIEW_DPI_300: g_app.state.export_dpi = 300; break;
+        case IDM_VIEW_DPI_600: g_app.state.export_dpi = 600; break;
+        case IDM_ANNOT_SAVE: {
+            char path[MAX_PATH];
+            GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+            if (SaveAnnotationsJSON(path)) MessageBoxA(hwnd, path, "Saved Annotations", MB_OK);
+            break;
+        }
+        case IDM_ANNOT_LOAD: {
+            char path[MAX_PATH];
+            GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+            LoadAnnotationsJSON(path);
+            break;
+        }
+        case IDM_ANNOT_CLEAR: g_app.num_annotations = 0; InvalidateViewer(true); break;
+        case IDM_LAYER_CLEAR_ALL: {
+            EnterCriticalSection(&g_app.cs);
+            for (int i = 1; i < g_app.num_layers; ++i) {
+                if (g_app.layers[i].handle) g_object_unref(g_app.layers[i].handle);
+            }
+            if (g_app.num_layers > 1) g_app.num_layers = 1;
+            LeaveCriticalSection(&g_app.cs);
+            InvalidateViewer(true);
+            break;
+        }
+        case IDM_PIPE_TOGGLE: {
+            LONG active = InterlockedCompareExchange(&g_app.pipe_enabled, 0, 0);
+            InterlockedExchange(&g_app.pipe_enabled, !active);
+            MessageBoxW(hwnd, !active ? L"Named Pipe Enabled." : L"Named Pipe Disabled.", L"IPC State", MB_OK);
+            break;
+        }
+        case IDM_FILE_EXIT: DestroyWindow(hwnd); break;
+        }
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
-        g_app.Paint(hdc, rc);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+
+        if (w > 0 && h > 0) {
+            EnterCriticalSection(&g_app.cs);
+            if (!g_app.backbuffer_surface || g_app.backbuffer_w != w || g_app.backbuffer_h != h) {
+                if (g_app.backbuffer_surface) cairo_surface_destroy(g_app.backbuffer_surface);
+                if (g_app.cached_surface) cairo_surface_destroy(g_app.cached_surface);
+                g_app.backbuffer_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+                g_app.cached_surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+                g_app.backbuffer_w = w;
+                g_app.backbuffer_h = h;
+                g_app.cache_dirty = true;
+            }
+
+            if (g_app.cache_dirty) {
+                cairo_t* ccr = cairo_create(g_app.cached_surface);
+                RenderVectorCanvas(ccr, w, h, g_app.state.pan_x, g_app.state.pan_y);
+                cairo_destroy(ccr);
+                cairo_surface_flush(g_app.cached_surface);
+                g_app.cached_pan_x = g_app.state.pan_x;
+                g_app.cached_pan_y = g_app.state.pan_y;
+                g_app.cache_dirty = false;
+            }
+
+            cairo_t* bcr = cairo_create(g_app.backbuffer_surface);
+            cairo_set_source_rgb(bcr, 0.88, 0.88, 0.88);
+            cairo_paint(bcr);
+
+            double dx = g_app.state.pan_x - g_app.cached_pan_x;
+            double dy = g_app.state.pan_y - g_app.cached_pan_y;
+            cairo_set_source_surface(bcr, g_app.cached_surface, dx, dy);
+            cairo_paint(bcr);
+
+            if (g_app.state.lock_aspect_to_paper) {
+                PaperDimensions pd = GetPaperDimensions(g_app.state.paper_size);
+                double paper_ratio = pd.width_pt / pd.height_pt;
+                double canvas_ratio = (double)w / (double)h;
+                double fw = (canvas_ratio > paper_ratio) ? (h * paper_ratio) : w;
+                double fh = (canvas_ratio > paper_ratio) ? h : (w / paper_ratio);
+                cairo_set_source_rgba(bcr, 0.85, 0.15, 0.15, 0.85);
+                cairo_set_line_width(bcr, 2.0);
+                cairo_rectangle(bcr, (w - fw) / 2.0, (h - fh) / 2.0, fw, fh);
+                cairo_stroke(bcr);
+            }
+            cairo_destroy(bcr);
+            cairo_surface_flush(g_app.backbuffer_surface);
+
+            BITMAPINFO bmi = { 0 };
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = w;
+            bmi.bmiHeader.biHeight = -h;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h, 
+                cairo_image_surface_get_data(g_app.backbuffer_surface), &bmi, DIB_RGB_COLORS);
+            LeaveCriticalSection(&g_app.cs);
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
-        double factor = (delta > 0) ? 1.15 : 0.85;
-        g_app.state.zoom *= factor;
-        g_app.Invalidate();
+        g_app.state.zoom *= (delta > 0) ? 1.15 : 0.85;
+        InvalidateViewer(true);
         return 0;
     }
     case WM_LBUTTONDOWN:
@@ -601,7 +1141,6 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_app.last_mouse.y = GET_Y_LPARAM(lParam);
         SetCapture(hwnd);
         return 0;
-
     case WM_MOUSEMOVE:
         if (g_app.is_panning) {
             int x = GET_X_LPARAM(lParam);
@@ -610,48 +1149,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.pan_y += (y - g_app.last_mouse.y);
             g_app.last_mouse.x = x;
             g_app.last_mouse.y = y;
-            
-            // Fast redraw without vector re-rasterization
-            g_app.Invalidate(false); 
-            
+            InvalidateViewer(false);
         }
         return 0;
-
     case WM_LBUTTONUP:
         if (g_app.is_panning) {
             g_app.is_panning = false;
             ReleaseCapture();
-
-            // Settle & crisp re-render
-            g_app.Invalidate(true); 
+            InvalidateViewer(true);
         }
         return 0;
-
-    case WM_KEYDOWN:
-        switch (wParam) {
-            case 'R': // Rotate 90 CW
-                g_app.state.rotation_deg = std::fmod(g_app.state.rotation_deg + 90.0, 360.0);
-                g_app.Invalidate();
-                break;
-            case 'P': // Toggle Paper Aspect Lock
-                g_app.state.lock_aspect_to_paper = !g_app.state.lock_aspect_to_paper;
-                g_app.Invalidate();
-                break;
-            case '1': g_app.state.paper_size = PAPER_A4; g_app.Invalidate(); break;
-            case '2': g_app.state.paper_size = PAPER_A3; g_app.Invalidate(); break;
-            case '3': g_app.state.paper_size = PAPER_LETTER; g_app.Invalidate(); break;
-            case '4': g_app.state.export_dpi = 150; break;
-            case '5': g_app.state.export_dpi = 300; break;
-            case '6': g_app.state.export_dpi = 600; break;
-            case 'S': // Quick Export to test files
-                g_app.ExportRaster(L"output.bmp", false);
-                g_app.ExportRaster(L"output.tiff", true);
-                g_app.ExportPDF("output.pdf");
-                MessageBoxW(hwnd, L"Exported to output.bmp, output.tiff, output.pdf", L"Export Done", MB_OK);
-                break;
-        }
+    case WM_RBUTTONDOWN:
+        HandleContextMenu(hwnd, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         return 0;
-
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -662,44 +1172,67 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 // -------------------------------------------------------------
 // WinMain Entry Point
 // -------------------------------------------------------------
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    InitializeCriticalSection(&g_app.cs);
+    g_app.state.zoom = 1.0;
+    g_app.state.export_dpi = 300;
+    g_app.state.paper_size = PAPER_A4;
+    g_app.cache_dirty = true;
+    g_app.pipe_enabled = 1;
+    g_app.rpc_running = 1;
+    wcsncpy_s(g_app.pipe_name, MAX_PATH, DEFAULT_PIPE_NAME, _TRUNCATE);
+
+    // Parse CLI Pipe Override
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; i < argc; ++i) {
+        if (wcscmp(argv[i], L"--pipe") == 0 && i + 1 < argc) {
+            if (wcsstr(argv[i + 1], L"\\\\.\\pipe\\") == argv[i + 1]) {
+                wcsncpy_s(g_app.pipe_name, MAX_PATH, argv[i + 1], _TRUNCATE);
+            } else {
+                swprintf_s(g_app.pipe_name, MAX_PATH, L"\\\\.\\pipe\\%s", argv[i + 1]);
+            }
+            break;
+        }
+    }
+    LocalFree(argv);
+
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.lpszClassName = L"SVGViewerCPUClass";
+    wc.lpszClassName = L"SvgViewerFullStandAlone";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(
-        0, wc.lpszClassName, 
-        L"Pure CPU SVG Viewer (Win32 + Cairo + Librsvg)", 
-        WS_OVERLAPPEDWINDOW, 
-        CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, 
+        0, wc.lpszClassName,
+        L"Pure CPU SVG Viewer & Annotator",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 800,
         NULL, NULL, hInstance, NULL
     );
 
     g_app.hwnd = hwnd;
+    CreateApplicationMenu(hwnd);
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
-    // Start background JSON-RPC server thread
-    std::atomic<bool> rpc_running(true);
-    std::thread rpc_thread(StartNamedPipeServer, std::ref(rpc_running));
+    // Launch Async JSON-RPC Pipe Thread
+    g_app.h_pipe_thread = CreateThread(NULL, 0, NamedPipeServerThread, NULL, 0, NULL);
 
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
+    while (GetMessageW(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
-    rpc_running = false;
-    // Wake up named pipe connect blocking if needed
-    HANDLE hCancel = CreateFileW(PIPE_NAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hCancel != INVALID_HANDLE_VALUE) CloseHandle(hCancel);
+    InterlockedExchange(&g_app.rpc_running, 0);
+    // Wake up pipe connect call
+    HANDLE hWake = CreateFileW(g_app.pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hWake != INVALID_HANDLE_VALUE) CloseHandle(hWake);
+    WaitForSingleObject(g_app.h_pipe_thread, 1000);
+    CloseHandle(g_app.h_pipe_thread);
 
-    if (rpc_thread.joinable()) {
-        rpc_thread.join();
-    }
-
+    DeleteCriticalSection(&g_app.cs);
     return (int)msg.wParam;
 }
