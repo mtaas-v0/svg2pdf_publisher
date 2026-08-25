@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,9 +15,10 @@
 #include <cairo.h>
 #include <cairo-pdf.h>
 #include <librsvg/rsvg.h>
+#include <cJSON.h>
 
 // -------------------------------------------------------------
-// Constants & Menu Command Identifiers
+// Constants & UI Identifiers
 // -------------------------------------------------------------
 #define MAX_LAYERS 64
 #define MAX_HITTESTS 128
@@ -24,7 +26,7 @@
 #define MAX_EVENT_QUEUE 128
 #define DEFAULT_PIPE_NAME L"\\\\.\\pipe\\svgviewer_ipc"
 
-// Menu IDs
+// Menu Command IDs
 #define IDM_FILE_OPEN             1001
 #define IDM_FILE_EXPORT_BMP       1002
 #define IDM_FILE_EXPORT_TIFF      1003
@@ -58,12 +60,11 @@
 #define IDM_PIPE_TOGGLE           1401
 #define IDM_PIPE_RENAME           1402
 
-// Context Menu Dynamic IDs
+// Dynamic Context Menu IDs
 #define IDM_CTX_ATTACH_HERE       2001
 #define IDM_CTX_ANNOT_POINT_HERE  2002
 #define IDM_CTX_ANNOT_RECT_HERE   2003
 #define IDM_CTX_ANNOT_ARROW_HERE  2004
-#define IDM_CTX_LAYER_DETACH      2100
 #define IDM_CTX_HITTEST_BASE      3000
 
 // -------------------------------------------------------------
@@ -140,7 +141,7 @@ typedef struct {
     char text[256];
     double x, y, w, h;
     double arrow_tip_x, arrow_tip_y;
-    Point2D poly_points[16];
+    Point2D poly_points[32];
     int num_points;
 } Annotation;
 
@@ -172,15 +173,12 @@ typedef struct {
 } TiffTag;
 #pragma pack(pop)
 
-// -------------------------------------------------------------
-// Global Application State
-// -------------------------------------------------------------
 typedef struct {
     HWND hwnd;
     ViewState state;
     CRITICAL_SECTION cs;
 
-    // Multi-Layer SVG Engine
+    // Multi-SVG Layers
     SvgLayer layers[MAX_LAYERS];
     int num_layers;
     char root_svg_path[MAX_PATH];
@@ -189,13 +187,13 @@ typedef struct {
     Annotation annotations[MAX_ANNOTATIONS];
     int num_annotations;
 
-    // Hit Testing & Events
+    // Hit Testing & Context Menu Events
     HitTestArea hit_areas[MAX_HITTESTS];
     int num_hit_areas;
     ContextMenuEvent event_queue[MAX_EVENT_QUEUE];
     int num_events;
 
-    // Interaction Cache & Backbuffers
+    // Fast-Pan Interaction Cache & CPU Buffers
     bool is_panning;
     POINT last_mouse;
     cairo_surface_t* backbuffer_surface;
@@ -216,7 +214,7 @@ typedef struct {
 static AppState g_app;
 
 // -------------------------------------------------------------
-// Coordinate Space Conversions
+// Coordinate Space Transformations
 // -------------------------------------------------------------
 void ScreenToWorld(double sx, double sy, double* wx, double* wy) {
     double cx = (g_app.backbuffer_w / 2.0) + g_app.state.pan_x;
@@ -325,7 +323,7 @@ bool SaveCairoSurfaceToTIFF(cairo_surface_t* surface, const wchar_t* filepath, i
 }
 
 // -------------------------------------------------------------
-// Multi-Layer & Annotation Engine
+// Multi-Layer SVG Engine & Vector Drawing
 // -------------------------------------------------------------
 void InvalidateViewer(bool force_dirty) {
     if (force_dirty) g_app.cache_dirty = true;
@@ -409,7 +407,7 @@ void DrawArrow(cairo_t* cr, double from_x, double from_y, double to_x, double to
     cairo_stroke(cr);
 
     double angle = atan2(to_y - from_y, to_x - from_x);
-    double head_len = 10.0;
+    double head_len = 12.0;
 
     cairo_save(cr);
     cairo_translate(cr, to_x, to_y);
@@ -423,21 +421,21 @@ void DrawArrow(cairo_t* cr, double from_x, double from_y, double to_x, double to
 }
 
 void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px, double py) {
+    // 1. Strict CPU Clipping
     cairo_save(cr);
     cairo_rectangle(cr, 0, 0, target_w, target_h);
     cairo_clip(cr);
 
-    // Canvas Background
     cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
     cairo_paint(cr);
 
     cairo_save(cr);
-    // Camera Transform
+    // Viewport Transformation
     cairo_translate(cr, target_w / 2.0 + px, target_h / 2.0 + py);
     cairo_rotate(cr, g_app.state.rotation_deg * M_PI / 180.0);
     cairo_scale(cr, g_app.state.zoom, g_app.state.zoom);
 
-    // 1. Render SVG Layers
+    // 2. Render SVG Layers
     for (int i = 0; i < g_app.num_layers; ++i) {
         SvgLayer* l = &g_app.layers[i];
         if (!l->handle) continue;
@@ -449,19 +447,18 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
         cairo_restore(cr);
     }
 
-    // 2. Render Annotations
+    // 3. Render Annotations
     for (int i = 0; i < g_app.num_annotations; ++i) {
         Annotation* a = &g_app.annotations[i];
         cairo_save(cr);
-
         cairo_select_font_face(cr, "Segoe UI", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-        cairo_set_font_size(cr, 14.0);
+        cairo_set_font_size(cr, 13.0);
 
         if (a->type == ANNOT_POINT_TEXT) {
-            cairo_set_source_rgba(cr, 0.9, 0.1, 0.1, 1.0);
-            cairo_arc(cr, a->x, a->y, 4.0, 0, 2 * M_PI);
+            cairo_set_source_rgba(cr, 0.9, 0.15, 0.15, 1.0);
+            cairo_arc(cr, a->x, a->y, 4.5, 0, 2 * M_PI);
             cairo_fill(cr);
-            cairo_move_to(cr, a->x + 8.0, a->y + 5.0);
+            cairo_move_to(cr, a->x + 8.0, a->y + 4.0);
             cairo_show_text(cr, a->text);
         } else if (a->type == ANNOT_RECT_TEXT) {
             cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.2);
@@ -470,20 +467,20 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
             cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.9);
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
-            cairo_move_to(cr, a->x + 5.0, a->y + 18.0);
+            cairo_move_to(cr, a->x + 6.0, a->y + 16.0);
             cairo_show_text(cr, a->text);
         } else if (a->type == ANNOT_POLYGON && a->num_points >= 3) {
-            cairo_set_source_rgba(cr, 0.1, 0.8, 0.3, 0.2);
+            cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.2);
             cairo_move_to(cr, a->poly_points[0].x, a->poly_points[0].y);
             for (int p = 1; p < a->num_points; ++p) {
                 cairo_line_to(cr, a->poly_points[p].x, a->poly_points[p].y);
             }
             cairo_close_path(cr);
             cairo_fill_preserve(cr);
-            cairo_set_source_rgba(cr, 0.1, 0.8, 0.3, 0.9);
+            cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.9);
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
-            cairo_move_to(cr, a->poly_points[0].x + 5.0, a->poly_points[0].y + 18.0);
+            cairo_move_to(cr, a->poly_points[0].x + 6.0, a->poly_points[0].y + 16.0);
             cairo_show_text(cr, a->text);
         } else if (a->type == ANNOT_ARROW) {
             cairo_set_source_rgba(cr, 0.8, 0.2, 0.8, 0.9);
@@ -500,7 +497,7 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
 }
 
 // -------------------------------------------------------------
-// Annotation Persistence (-svgAnnotV0.json)
+// Sidecar Annotation Persistence using cJSON (-svgAnnotV0.json)
 // -------------------------------------------------------------
 void GetSidecarAnnotationPath(const char* svg_path, char* out_annot_path, size_t max_len) {
     strncpy_s(out_annot_path, max_len, svg_path, _TRUNCATE);
@@ -510,72 +507,106 @@ void GetSidecarAnnotationPath(const char* svg_path, char* out_annot_path, size_t
 }
 
 bool SaveAnnotationsJSON(const char* filepath) {
-    FILE* f = fopen(filepath, "w");
-    if (!f) return false;
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "version", "svgAnnotV0");
 
-    fprintf(f, "{\n  \"version\": \"svgAnnotV0\",\n  \"annotations\": [\n");
+    cJSON* arr = cJSON_AddArrayToObject(root, "annotations");
     for (int i = 0; i < g_app.num_annotations; ++i) {
         Annotation* a = &g_app.annotations[i];
-        fprintf(f, "    {\n      \"id\": \"%s\",\n      \"type\": %d,\n      \"text\": \"%s\",\n", a->id, a->type, a->text);
-        fprintf(f, "      \"x\": %f, \"y\": %f, \"w\": %f, \"h\": %f,\n", a->x, a->y, a->w, a->h);
-        fprintf(f, "      \"arrow_tip_x\": %f, \"arrow_tip_y\": %f,\n", a->arrow_tip_x, a->arrow_tip_y);
-        fprintf(f, "      \"num_points\": %d,\n      \"points\": [", a->num_points);
-        for (int p = 0; p < a->num_points; ++p) {
-            fprintf(f, "[%f,%f]%s", a->poly_points[p].x, a->poly_points[p].y, (p + 1 < a->num_points) ? "," : "");
+        cJSON* obj = cJSON_CreateObject();
+        cJSON_AddStringToObject(obj, "id", a->id);
+        cJSON_AddNumberToObject(obj, "type", (int)a->type);
+        cJSON_AddStringToObject(obj, "text", a->text);
+        cJSON_AddNumberToObject(obj, "x", a->x);
+        cJSON_AddNumberToObject(obj, "y", a->y);
+        cJSON_AddNumberToObject(obj, "w", a->w);
+        cJSON_AddNumberToObject(obj, "h", a->h);
+        cJSON_AddNumberToObject(obj, "arrow_tip_x", a->arrow_tip_x);
+        cJSON_AddNumberToObject(obj, "arrow_tip_y", a->arrow_tip_y);
+
+        if (a->type == ANNOT_POLYGON) {
+            cJSON* pts = cJSON_AddArrayToObject(obj, "points");
+            for (int p = 0; p < a->num_points; ++p) {
+                cJSON* pt = cJSON_CreateArray();
+                cJSON_AddItemToArray(pt, cJSON_CreateNumber(a->poly_points[p].x));
+                cJSON_AddItemToArray(pt, cJSON_CreateNumber(a->poly_points[p].y));
+                cJSON_AddItemToArray(pts, pt);
+            }
         }
-        fprintf(f, "]\n    }%s\n", (i + 1 < g_app.num_annotations) ? "," : "");
+        cJSON_AddItemToArray(arr, obj);
     }
-    fprintf(f, "  ]\n}\n");
-    fclose(f);
-    return true;
+
+    char* rendered = cJSON_Print(root);
+    FILE* f = fopen(filepath, "w");
+    bool ok = false;
+    if (f) {
+        fputs(rendered, f);
+        fclose(f);
+        ok = true;
+    }
+    free(rendered);
+    cJSON_Delete(root);
+    return ok;
 }
 
 bool LoadAnnotationsJSON(const char* filepath) {
-    FILE* f = fopen(filepath, "r");
+    FILE* f = fopen(filepath, "rb");
     if (!f) return false;
 
-    char buffer[4096];
-    g_app.num_annotations = 0;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
 
-    Annotation current = { 0 };
-    bool in_annot = false;
+    char* data = (char*)malloc(len + 1);
+    if (!data) { fclose(f); return false; }
+    fread(data, 1, len, f);
+    data[len] = '\0';
+    fclose(f);
 
-    while (fgets(buffer, sizeof(buffer), f)) {
-        if (strstr(buffer, "\"id\":")) {
-            in_annot = true;
-            memset(&current, 0, sizeof(Annotation));
-            sscanf_s(buffer, "%*[^:] : \"%[^\"]\"", current.id, (unsigned)sizeof(current.id));
-        } else if (strstr(buffer, "\"type\":")) {
-            int t = 0;
-            sscanf_s(buffer, "%*[^:] : %d", &t);
-            current.type = (AnnotType)t;
-        } else if (strstr(buffer, "\"text\":")) {
-            sscanf_s(buffer, "%*[^:] : \"%[^\"]\"", current.text, (unsigned)sizeof(current.text));
-        } else if (strstr(buffer, "\"x\":")) {
-            float x, y, w, h;
-            sscanf_s(buffer, "%*[^:] : %f , \"y\" : %f , \"w\" : %f , \"h\" : %f", &x, &y, &w, &h);
-            current.x = x; current.y = y; current.w = w; current.h = h;
-        } else if (strstr(buffer, "\"arrow_tip_x\":")) {
-            float ax, ay;
-            sscanf_s(buffer, "%*[^:] : %f , \"arrow_tip_y\" : %f", &ax, &ay);
-            current.arrow_tip_x = ax; current.arrow_tip_y = ay;
-        } else if (strstr(buffer, "\"num_points\":")) {
-            sscanf_s(buffer, "%*[^:] : %d", &current.num_points);
-        } else if (strstr(buffer, "}") && in_annot) {
-            if (g_app.num_annotations < MAX_ANNOTATIONS) {
-                g_app.annotations[g_app.num_annotations++] = current;
+    cJSON* root = cJSON_Parse(data);
+    free(data);
+    if (!root) return false;
+
+    cJSON* arr = cJSON_GetObjectItem(root, "annotations");
+    if (cJSON_IsArray(arr)) {
+        g_app.num_annotations = 0;
+        cJSON* item = NULL;
+        cJSON_ArrayForEach(item, arr) {
+            if (g_app.num_annotations >= MAX_ANNOTATIONS) break;
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            memset(a, 0, sizeof(Annotation));
+
+            strncpy_s(a->id, sizeof(a->id), cJSON_GetStringValue(cJSON_GetObjectItem(item, "id")), _TRUNCATE);
+            a->type = (AnnotType)cJSON_GetNumberValue(cJSON_GetObjectItem(item, "type"));
+            strncpy_s(a->text, sizeof(a->text), cJSON_GetStringValue(cJSON_GetObjectItem(item, "text")), _TRUNCATE);
+            a->x = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "x"));
+            a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "y"));
+            a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "w"));
+            a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "h"));
+            a->arrow_tip_x = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "arrow_tip_x"));
+            a->arrow_tip_y = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "arrow_tip_y"));
+
+            cJSON* pts = cJSON_GetObjectItem(item, "points");
+            if (cJSON_IsArray(pts)) {
+                cJSON* p = NULL;
+                a->num_points = 0;
+                cJSON_ArrayForEach(p, pts) {
+                    if (a->num_points < 32 && cJSON_IsArray(p) && cJSON_GetArraySize(p) >= 2) {
+                        a->poly_points[a->num_points].x = cJSON_GetArrayItem(p, 0)->valuedouble;
+                        a->poly_points[a->num_points].y = cJSON_GetArrayItem(p, 1)->valuedouble;
+                        a->num_points++;
+                    }
+                }
             }
-            in_annot = false;
         }
     }
-
-    fclose(f);
+    cJSON_Delete(root);
     InvalidateViewer(true);
     return true;
 }
 
 // -------------------------------------------------------------
-// Exporters Execution
+// Exporters Trigger
 // -------------------------------------------------------------
 void TriggerExport(const wchar_t* path, int fmt) {
     PaperDimensions pd = GetPaperDimensions(g_app.state.paper_size);
@@ -617,12 +648,11 @@ void TriggerExport(const wchar_t* path, int fmt) {
 }
 
 // -------------------------------------------------------------
-// Menus & Context Menu Dispatcher
+// Menus & Context Menu Handling
 // -------------------------------------------------------------
 void CreateApplicationMenu(HWND hwnd) {
     HMENU hMenuBar = CreateMenu();
-    
-    // File Menu
+
     HMENU hFile = CreatePopupMenu();
     AppendMenuW(hFile, MF_STRING, IDM_FILE_OPEN, L"&Open Root SVG...\tCtrl+O");
     AppendMenuW(hFile, MF_SEPARATOR, 0, NULL);
@@ -633,7 +663,6 @@ void CreateApplicationMenu(HWND hwnd) {
     AppendMenuW(hFile, MF_STRING, IDM_FILE_EXIT, L"E&xit\tAlt+F4");
     AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
 
-    // View Menu
     HMENU hView = CreatePopupMenu();
     AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_IN, L"Zoom &In (+)");
     AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, L"Zoom &Out (-)");
@@ -643,11 +672,13 @@ void CreateApplicationMenu(HWND hwnd) {
     AppendMenuW(hView, MF_STRING, IDM_VIEW_ROTATE_CCW, L"Rotate 90° CC&W");
     AppendMenuW(hView, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hView, MF_STRING, IDM_VIEW_TOGGLE_ASPECT, L"Lock Aspect to Paper Size (P)");
+
     HMENU hPaper = CreatePopupMenu();
     AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_A4, L"A4 (210 x 297 mm)");
     AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_A3, L"A3 (297 x 420 mm)");
     AppendMenuW(hPaper, MF_STRING, IDM_VIEW_PAPER_LETTER, L"US Letter (8.5 x 11 in)");
-    AppendMenuW(hView, MF_POPUP, (UINT_PTR)hPaper, L"Paper Size");
+    AppendMenuW(hView, MF_POPUP, (UINT_PTR)hPaper, L"Export Paper Size");
+
     HMENU hDpi = CreatePopupMenu();
     AppendMenuW(hDpi, MF_STRING, IDM_VIEW_DPI_150, L"150 DPI");
     AppendMenuW(hDpi, MF_STRING, IDM_VIEW_DPI_300, L"300 DPI");
@@ -655,17 +686,15 @@ void CreateApplicationMenu(HWND hwnd) {
     AppendMenuW(hView, MF_POPUP, (UINT_PTR)hDpi, L"Export DPI");
     AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hView, L"&View");
 
-    // Layers Menu
     HMENU hLayers = CreatePopupMenu();
     AppendMenuW(hLayers, MF_STRING, IDM_LAYER_ATTACH_FILE, L"&Attach SVG Layer from File...");
     AppendMenuW(hLayers, MF_STRING, IDM_LAYER_CLEAR_ALL, L"&Clear All Overlays");
     AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hLayers, L"&Layers");
 
-    // Annotations Menu
     HMENU hAnnot = CreatePopupMenu();
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POINT, L"Add Point Marker Text");
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_RECT, L"Add Box Area Text");
-    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POLY, L"Add Polygon Highlight Area");
+    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POLY, L"Add Polygon Area");
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_ARROW, L"Add Arrow Callout");
     AppendMenuW(hAnnot, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_SAVE, L"&Save Sidecar Annotations (-svgAnnotV0.json)");
@@ -673,10 +702,8 @@ void CreateApplicationMenu(HWND hwnd) {
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_CLEAR, L"Clear All Annotations");
     AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hAnnot, L"&Annotations");
 
-    // Named Pipe IPC Menu
     HMENU hPipe = CreatePopupMenu();
     AppendMenuW(hPipe, MF_STRING, IDM_PIPE_TOGGLE, L"&Toggle Named Pipe Server");
-    AppendMenuW(hPipe, MF_STRING, IDM_PIPE_RENAME, L"&Configure Pipe Name...");
     AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hPipe, L"&IPC Server");
 
     SetMenu(hwnd, hMenuBar);
@@ -687,7 +714,7 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
     double wx = 0.0, wy = 0.0;
     ScreenToWorld(mx, my, &wx, &wy);
 
-    // 1. Check Hit Test Areas
+    // Check Hit Test Areas
     for (int i = g_app.num_hit_areas - 1; i >= 0; --i) {
         HitTestArea* h = &g_app.hit_areas[i];
         double tx = wx, ty = wy;
@@ -728,11 +755,11 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
         }
     }
 
-    // 2. Default Canvas Context Menu
+    // Default Canvas Context Menu
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_ATTACH_HERE, L"Attach SVG File Here...");
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_POINT_HERE, L"Add Point Text Annotation Here");
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_RECT_HERE, L"Add Box Text Annotation Here");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_POINT_HERE, L"Add Point Text Here");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_RECT_HERE, L"Add Box Text Here");
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_ARROW_HERE, L"Add Arrow Callout Here");
 
     POINT pt = { mx, my };
@@ -781,7 +808,7 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
             snprintf(a->id, sizeof(a->id), "annot_%d", g_app.num_annotations);
             a->type = ANNOT_ARROW;
             a->x = wx; a->y = wy;
-            a->arrow_tip_x = wx + 50; a->arrow_tip_y = wy - 50;
+            a->arrow_tip_x = wx + 60; a->arrow_tip_y = wy - 60;
             strncpy_s(a->text, sizeof(a->text), "Callout", _TRUNCATE);
             InvalidateViewer(true);
         }
@@ -789,130 +816,236 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
 }
 
 // -------------------------------------------------------------
-// JSON-RPC Command Dispatcher
+// cJSON-Powered JSON-RPC Protocol Dispatcher
 // -------------------------------------------------------------
-void ExecuteRPC(const char* line, char* response, size_t max_resp) {
+void ExecuteRPC(const char* raw_json, char* response, size_t max_resp) {
     EnterCriticalSection(&g_app.cs);
 
-    auto extract_str = [&](const char* key, char* out, size_t max_len) -> bool {
-        char pattern[64];
-        snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-        const char* k = strstr(line, pattern);
-        if (!k) return false;
-        const char* colon = strchr(k, ':');
-        if (!colon) return false;
-        const char* q1 = strchr(colon, '\"');
-        if (!q1) return false;
-        const char* q2 = strchr(q1 + 1, '\"');
-        if (!q2) return false;
-        size_t len = q2 - q1 - 1;
-        if (len >= max_len) len = max_len - 1;
-        strncpy_s(out, max_len, q1 + 1, len);
-        out[len] = '\0';
-        return true;
-    };
+    cJSON* root = cJSON_Parse(raw_json);
+    if (!root) {
+        snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"invalid json\"}\n");
+        LeaveCriticalSection(&g_app.cs);
+        return;
+    }
 
-    auto extract_num = [&](const char* key, double def) -> double {
-        char pattern[64];
-        snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-        const char* k = strstr(line, pattern);
-        if (!k) return def;
-        float val = (float)def;
-        sscanf_s(k, "%*[^0-9.-]%f", &val);
-        return (double)val;
-    };
+    cJSON* cmd = cJSON_GetObjectItemCaseSensitive(root, "command");
+    const char* cmd_name = cJSON_GetStringValue(cmd);
 
-    if (strstr(line, "\"load_svg_string\"")) {
-        char svguid[64] = "layer_default";
-        char svg_str[8192] = { 0 };
-        extract_str("svguid", svguid, sizeof(svguid));
-        extract_str("svg_str", svg_str, sizeof(svg_str));
-        double x = extract_num("x", 0.0);
-        double y = extract_num("y", 0.0);
-        double scale = extract_num("scale", 1.0);
-        double rot = extract_num("rotation", 0.0);
-        if (AttachSvgData(svguid, svg_str, strlen(svg_str), x, y, scale, rot)) {
+    if (!cmd_name) {
+        snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"missing command\"}\n");
+    } else if (strcmp(cmd_name, "load_svg_string") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        const char* svg_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svg_str"));
+        double x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+        double y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+        double scale = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "scale"));
+        double rot = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "rotation"));
+        if (!svguid) svguid = "layer_default";
+
+        if (svg_str && AttachSvgData(svguid, svg_str, strlen(svg_str), x, y, scale, rot)) {
             snprintf(response, max_resp, "{\"status\":\"ok\",\"svguid\":\"%s\"}\n", svguid);
         } else {
-            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"parse failed\"}\n");
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"failed to parse svg string\"}\n");
         }
-    } else if (strstr(line, "\"remove_svg\"")) {
-        char svguid[64] = { 0 };
-        extract_str("svguid", svguid, sizeof(svguid));
-        RemoveSvgInternal(svguid);
+    } else if (strcmp(cmd_name, "load_svg_file") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        const char* filepath = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        double x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+        double y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+        double scale = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "scale"));
+        double rot = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "rotation"));
+        if (!svguid) svguid = "root";
+
+        if (filepath && AttachSvgFile(svguid, filepath, x, y, scale, rot)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"svguid\":\"%s\"}\n", svguid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"failed to load file\"}\n");
+        }
+    } else if (strcmp(cmd_name, "remove_svg") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        if (svguid) {
+            RemoveSvgInternal(svguid);
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"removed\":\"%s\"}\n", svguid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"missing svguid\"}\n");
+        }
+    } else if (strcmp(cmd_name, "clear_layers") == 0) {
+        for (int i = 0; i < g_app.num_layers; ++i) {
+            if (g_app.layers[i].handle) g_object_unref(g_app.layers[i].handle);
+        }
+        g_app.num_layers = 0;
         InvalidateViewer(true);
-        snprintf(response, max_resp, "{\"status\":\"ok\",\"removed\":\"%s\"}\n", svguid);
-    } else if (strstr(line, "\"add_hit_test\"")) {
+        snprintf(response, max_resp, "{\"status\":\"ok\",\"cleared\":true}\n");
+    } else if (strcmp(cmd_name, "add_hit_test") == 0) {
         if (g_app.num_hit_areas < MAX_HITTESTS) {
             HitTestArea* h = &g_app.hit_areas[g_app.num_hit_areas++];
             memset(h, 0, sizeof(HitTestArea));
-            extract_str("hittest_uid", h->hittest_uid, sizeof(h->hittest_uid));
-            extract_str("svguid", h->svguid, sizeof(h->svguid));
-            const char* r = strstr(line, "\"rect\"");
-            if (r) {
-                float rx, ry, rw, rh;
-                sscanf_s(r, "%*[^0-9.-]%f%*[^0-9.-]%f%*[^0-9.-]%f%*[^0-9.-]%f", &rx, &ry, &rw, &rh);
-                h->x = rx; h->y = ry; h->w = rw; h->h = rh;
+
+            const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "hittest_uid"));
+            const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+            if (uid) strncpy_s(h->hittest_uid, sizeof(h->hittest_uid), uid, _TRUNCATE);
+            if (svguid) strncpy_s(h->svguid, sizeof(h->svguid), svguid, _TRUNCATE);
+
+            cJSON* rect = cJSON_GetObjectItem(root, "rect");
+            if (cJSON_IsArray(rect) && cJSON_GetArraySize(rect) == 4) {
+                h->x = cJSON_GetArrayItem(rect, 0)->valuedouble;
+                h->y = cJSON_GetArrayItem(rect, 1)->valuedouble;
+                h->w = cJSON_GetArrayItem(rect, 2)->valuedouble;
+                h->h = cJSON_GetArrayItem(rect, 3)->valuedouble;
             }
-            const char* cmd = strstr(line, "\"context_menu_commands\"");
-            if (cmd) {
-                const char* start = strchr(cmd, '[');
-                const char* end = strchr(cmd, ']');
-                if (start && end && start < end) {
-                    const char* cur = start;
-                    while ((cur = strchr(cur, '\"')) && cur < end) {
-                        const char* q2 = strchr(cur + 1, '\"');
-                        if (!q2 || q2 > end) break;
-                        size_t l = q2 - cur - 1;
-                        if (h->num_commands < 8) {
-                            strncpy_s(h->commands[h->num_commands], 64, cur + 1, l);
-                            h->commands[h->num_commands][l] = '\0';
-                            h->num_commands++;
-                        }
-                        cur = q2 + 1;
+
+            cJSON* cmds = cJSON_GetObjectItem(root, "context_menu_commands");
+            if (cJSON_IsArray(cmds)) {
+                cJSON* item = NULL;
+                h->num_commands = 0;
+                cJSON_ArrayForEach(item, cmds) {
+                    if (cJSON_IsString(item) && h->num_commands < 8) {
+                        strncpy_s(h->commands[h->num_commands++], 64, item->valuestring, _TRUNCATE);
                     }
                 }
             }
             snprintf(response, max_resp, "{\"status\":\"ok\",\"hittest_uid\":\"%s\"}\n", h->hittest_uid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"max hit tests reached\"}\n");
         }
-    } else if (strstr(line, "\"drain_context_menu_command_queue\"")) {
-        char buf[2048] = "{\"status\":\"ok\",\"events\":[";
+    } else if (strcmp(cmd_name, "drain_context_menu_command_queue") == 0) {
+        cJSON* resp = cJSON_CreateObject();
+        cJSON_AddStringToObject(resp, "status", "ok");
+        cJSON* events = cJSON_AddArrayToObject(resp, "events");
         for (int i = 0; i < g_app.num_events; ++i) {
-            char entry[256];
-            snprintf(entry, sizeof(entry), "{\"hittest_uid\":\"%s\",\"command\":\"%s\"}%s", 
-                g_app.event_queue[i].hittest_uid, g_app.event_queue[i].command, 
-                (i + 1 < g_app.num_events) ? "," : "");
-            strncat_s(buf, sizeof(buf), entry, _TRUNCATE);
+            cJSON* ev = cJSON_CreateObject();
+            cJSON_AddStringToObject(ev, "hittest_uid", g_app.event_queue[i].hittest_uid);
+            cJSON_AddStringToObject(ev, "command", g_app.event_queue[i].command);
+            cJSON_AddItemToArray(events, ev);
         }
-        strncat_s(buf, sizeof(buf), "]}\n", _TRUNCATE);
         g_app.num_events = 0;
-        strncpy_s(response, max_resp, buf, _TRUNCATE);
-    } else if (strstr(line, "\"get_viewport\"")) {
+        char* printed = cJSON_PrintUnformatted(resp);
+        snprintf(response, max_resp, "%s\n", printed);
+        free(printed);
+        cJSON_Delete(resp);
+    } else if (strcmp(cmd_name, "get_rendered_size") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        const char* node_id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "node_id"));
+        bool found = false;
+
+        for (int i = 0; i < g_app.num_layers; ++i) {
+            if (svguid && strcmp(g_app.layers[i].svguid, svguid) == 0) {
+                RsvgDimensionData dim;
+                gboolean ok = FALSE;
+                if (node_id && node_id[0] != '\0') {
+                    char fmt_id[128];
+                    if (node_id[0] != '#') snprintf(fmt_id, sizeof(fmt_id), "#%s", node_id);
+                    else strncpy_s(fmt_id, sizeof(fmt_id), node_id, _TRUNCATE);
+                    ok = rsvg_handle_get_dimensions_sub(g_app.layers[i].handle, &dim, fmt_id);
+                } else {
+                    rsvg_handle_get_dimensions(g_app.layers[i].handle, &dim);
+                    ok = TRUE;
+                }
+
+                if (ok) {
+                    snprintf(response, max_resp, "{\"status\":\"ok\",\"svguid\":\"%s\",\"width\":%f,\"height\":%f}\n",
+                        svguid, dim.width * g_app.layers[i].scale, dim.height * g_app.layers[i].scale);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"layer or element not found\"}\n");
+        }
+    } else if (strcmp(cmd_name, "get_viewport") == 0) {
         const char* paper_str = "A4";
         if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
         else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
         else if (g_app.state.paper_size == PAPER_CUSTOM) paper_str = "Custom";
 
-        snprintf(response, max_resp, 
+        snprintf(response, max_resp,
             "{\"status\":\"ok\",\"viewport\":{\"zoom\":%f,\"pan_x\":%f,\"pan_y\":%f,\"rotation_deg\":%f,"
             "\"aspect_locked\":%s,\"export_paper_size\":\"%s\",\"export_dpi\":%d,"
             "\"canvas_width\":%d,\"canvas_height\":%d}}\n",
             g_app.state.zoom, g_app.state.pan_x, g_app.state.pan_y, g_app.state.rotation_deg,
             g_app.state.lock_aspect_to_paper ? "true" : "false", paper_str, g_app.state.export_dpi,
             g_app.backbuffer_w, g_app.backbuffer_h);
-    } else if (strstr(line, "\"save_annotations\"")) {
-        char path[MAX_PATH] = { 0 };
-        extract_str("filepath", path, sizeof(path));
-        if (path[0] == '\0') GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+    } else if (strcmp(cmd_name, "set_viewport") == 0) {
+        cJSON* z = cJSON_GetObjectItem(root, "zoom");
+        cJSON* px = cJSON_GetObjectItem(root, "pan_x");
+        cJSON* py = cJSON_GetObjectItem(root, "pan_y");
+        cJSON* rot = cJSON_GetObjectItem(root, "rotation_deg");
+        cJSON* dpi = cJSON_GetObjectItem(root, "export_dpi");
+        cJSON* aspect = cJSON_GetObjectItem(root, "aspect_locked");
+
+        if (z) g_app.state.zoom = z->valuedouble;
+        if (px) g_app.state.pan_x = px->valuedouble;
+        if (py) g_app.state.pan_y = py->valuedouble;
+        if (rot) g_app.state.rotation_deg = rot->valuedouble;
+        if (dpi) g_app.state.export_dpi = (int)dpi->valuedouble;
+        if (aspect) g_app.state.lock_aspect_to_paper = cJSON_IsTrue(aspect);
+
+        InvalidateViewer(true);
+        snprintf(response, max_resp, "{\"status\":\"ok\"}\n");
+    } else if (strcmp(cmd_name, "add_annotation") == 0) {
+        if (g_app.num_annotations < MAX_ANNOTATIONS) {
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            memset(a, 0, sizeof(Annotation));
+
+            const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+            const char* type_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "type"));
+            const char* text = cJSON_GetStringValue(cJSON_GetObjectItem(root, "text"));
+
+            if (uid) strncpy_s(a->id, sizeof(a->id), uid, _TRUNCATE);
+            if (text) strncpy_s(a->text, sizeof(a->text), text, _TRUNCATE);
+
+            a->x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+            a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+            a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "w"));
+            a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "h"));
+            a->arrow_tip_x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "arrow_tip_x"));
+            a->arrow_tip_y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "arrow_tip_y"));
+
+            if (type_str && strcmp(type_str, "rect") == 0) a->type = ANNOT_RECT_TEXT;
+            else if (type_str && strcmp(type_str, "arrow") == 0) a->type = ANNOT_ARROW;
+            else if (type_str && strcmp(type_str, "polygon") == 0) {
+                a->type = ANNOT_POLYGON;
+                cJSON* pts = cJSON_GetObjectItem(root, "points");
+                if (cJSON_IsArray(pts)) {
+                    cJSON* p = NULL;
+                    a->num_points = 0;
+                    cJSON_ArrayForEach(p, pts) {
+                        if (a->num_points < 32 && cJSON_IsArray(p) && cJSON_GetArraySize(p) >= 2) {
+                            a->poly_points[a->num_points].x = cJSON_GetArrayItem(p, 0)->valuedouble;
+                            a->poly_points[a->num_points].y = cJSON_GetArrayItem(p, 1)->valuedouble;
+                            a->num_points++;
+                        }
+                    }
+                }
+            } else {
+                a->type = ANNOT_POINT_TEXT;
+            }
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"annot_id\":\"%s\"}\n", a->id);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"max annotations reached\"}\n");
+        }
+    } else if (strcmp(cmd_name, "save_annotations") == 0) {
+        const char* path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        char sidecar[MAX_PATH];
+        if (!path) {
+            GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
+            path = sidecar;
+        }
         if (SaveAnnotationsJSON(path)) {
             snprintf(response, max_resp, "{\"status\":\"ok\",\"path\":\"%s\"}\n", path);
         } else {
             snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"save failed\"}\n");
         }
-    } else if (strstr(line, "\"load_annotations\"")) {
-        char path[MAX_PATH] = { 0 };
-        extract_str("filepath", path, sizeof(path));
-        if (path[0] == '\0') GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
+    } else if (strcmp(cmd_name, "load_annotations") == 0) {
+        const char* path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        char sidecar[MAX_PATH];
+        if (!path) {
+            GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
+            path = sidecar;
+        }
         if (LoadAnnotationsJSON(path)) {
             snprintf(response, max_resp, "{\"status\":\"ok\",\"loaded\":%d}\n", g_app.num_annotations);
         } else {
@@ -922,6 +1055,7 @@ void ExecuteRPC(const char* line, char* response, size_t max_resp) {
         snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"unknown rpc command\"}\n");
     }
 
+    cJSON_Delete(root);
     LeaveCriticalSection(&g_app.cs);
 }
 
@@ -931,7 +1065,7 @@ void ExecuteRPC(const char* line, char* response, size_t max_resp) {
 DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
     while (InterlockedCompareExchange(&g_app.rpc_running, 1, 1)) {
         if (!InterlockedCompareExchange(&g_app.pipe_enabled, 1, 1)) {
-            Sleep(250);
+            Sleep(200);
             continue;
         }
 
@@ -939,7 +1073,7 @@ DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
             g_app.pipe_name,
             PIPE_ACCESS_DUPLEX,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            1, 4096, 4096, 0, NULL
+            1, 65536, 65536, 0, NULL
         );
 
         if (hPipe == INVALID_HANDLE_VALUE) {
@@ -949,11 +1083,11 @@ DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
 
         BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected && InterlockedCompareExchange(&g_app.rpc_running, 1, 1)) {
-            char in_buffer[4096];
+            char in_buffer[65536];
             DWORD bytesRead = 0;
             while (ReadFile(hPipe, in_buffer, sizeof(in_buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
                 in_buffer[bytesRead] = '\0';
-                char out_response[4096] = { 0 };
+                char out_response[65536] = { 0 };
                 ExecuteRPC(in_buffer, out_response, sizeof(out_response));
                 DWORD written = 0;
                 WriteFile(hPipe, out_response, (DWORD)strlen(out_response), &written, NULL);
@@ -966,7 +1100,7 @@ DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
 }
 
 // -------------------------------------------------------------
-// Window Procedure
+// Win32 Window Procedure
 // -------------------------------------------------------------
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -989,12 +1123,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 g_app.num_layers = 0;
                 AttachSvgFile("root", g_app.root_svg_path, 0, 0, 1.0, 0.0);
-                
-                // Auto load sidecar annotation if exists
+
                 char sidecar[MAX_PATH];
                 GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
                 LoadAnnotationsJSON(sidecar);
-
                 LeaveCriticalSection(&g_app.cs);
             }
             break;
@@ -1032,7 +1164,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDM_ANNOT_SAVE: {
             char path[MAX_PATH];
             GetSidecarAnnotationPath(g_app.root_svg_path, path, sizeof(path));
-            if (SaveAnnotationsJSON(path)) MessageBoxA(hwnd, path, "Saved Annotations", MB_OK);
+            if (SaveAnnotationsJSON(path)) MessageBoxA(hwnd, path, "Saved Sidecar Annotations", MB_OK);
             break;
         }
         case IDM_ANNOT_LOAD: {
@@ -1055,7 +1187,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDM_PIPE_TOGGLE: {
             LONG active = InterlockedCompareExchange(&g_app.pipe_enabled, 0, 0);
             InterlockedExchange(&g_app.pipe_enabled, !active);
-            MessageBoxW(hwnd, !active ? L"Named Pipe Enabled." : L"Named Pipe Disabled.", L"IPC State", MB_OK);
+            MessageBoxW(hwnd, !active ? L"Named Pipe Server Enabled." : L"Named Pipe Server Disabled.", L"IPC Server", MB_OK);
             break;
         }
         case IDM_FILE_EXIT: DestroyWindow(hwnd); break;
@@ -1122,7 +1254,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             bmi.bmiHeader.biPlanes = 1;
             bmi.bmiHeader.biBitCount = 32;
             bmi.bmiHeader.biCompression = BI_RGB;
-            SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h, 
+            SetDIBitsToDevice(hdc, 0, 0, w, h, 0, 0, 0, h,
                 cairo_image_surface_get_data(g_app.backbuffer_surface), &bmi, DIB_RGB_COLORS);
             LeaveCriticalSection(&g_app.cs);
         }
@@ -1149,14 +1281,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_app.state.pan_y += (y - g_app.last_mouse.y);
             g_app.last_mouse.x = x;
             g_app.last_mouse.y = y;
-            InvalidateViewer(false);
+            InvalidateViewer(false); // Fast paint without vector re-rasterization
         }
         return 0;
     case WM_LBUTTONUP:
         if (g_app.is_panning) {
             g_app.is_panning = false;
             ReleaseCapture();
-            InvalidateViewer(true);
+            InvalidateViewer(true); // Crisp vector settle
         }
         return 0;
     case WM_RBUTTONDOWN:
@@ -1182,7 +1314,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     g_app.rpc_running = 1;
     wcsncpy_s(g_app.pipe_name, MAX_PATH, DEFAULT_PIPE_NAME, _TRUNCATE);
 
-    // Parse CLI Pipe Override
+    // Support --pipe <name> commandline argument for multi-instance IPC
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; ++i) {
@@ -1217,7 +1349,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
-    // Launch Async JSON-RPC Pipe Thread
+    // Launch Background JSON-RPC Server Thread
     g_app.h_pipe_thread = CreateThread(NULL, 0, NamedPipeServerThread, NULL, 0, NULL);
 
     MSG msg;
@@ -1227,7 +1359,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     InterlockedExchange(&g_app.rpc_running, 0);
-    // Wake up pipe connect call
+    // Unblock pipe wait
     HANDLE hWake = CreateFileW(g_app.pipe_name, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (hWake != INVALID_HANDLE_VALUE) CloseHandle(hWake);
     WaitForSingleObject(g_app.h_pipe_thread, 1000);
