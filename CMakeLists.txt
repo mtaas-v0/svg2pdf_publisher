@@ -19,11 +19,12 @@ message(STATUS "DEBUG: CMAKE_TOOLCHAIN_FILE = ${CMAKE_TOOLCHAIN_FILE}")
 find_package(PkgConfig REQUIRED)
 
 # 2. Use pkg-config to locate Cairo and create an IMPORTED target
+
+pkg_check_modules(Fontconfig REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(Cairo REQUIRED IMPORTED_TARGET cairo)
 
 
 find_package(unofficial-librsvg CONFIG REQUIRED)
-find_package(Fontconfig CONFIG REQUIRED)
 
 # 2. Map standard static file searches for your WOFF2 decompression library
 find_library(WOFF2_DEC_LIB NAMES woff2dec)
@@ -36,7 +37,7 @@ add_executable(publisher_convert main.cpp)
 target_link_libraries(publisher_convert PRIVATE 
     PkgConfig::Cairo
     unofficial::librsvg::librsvg
-    Fontconfig::Fontconfig
+    PkgConfig::Fontconfig
     ${WOFF2_DEC_LIB}
     ${WOFF2_COMMON_LIB}
 )
