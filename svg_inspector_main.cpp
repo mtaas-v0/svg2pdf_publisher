@@ -15,7 +15,7 @@
 #include <cairo.h>
 #include <cairo-pdf.h>
 #include <librsvg/rsvg.h>
-#include <cJSON.h>
+#include <cjson/cJSON.h>
 
 // -------------------------------------------------------------
 // Constants & UI Identifiers
