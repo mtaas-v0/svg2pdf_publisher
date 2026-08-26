@@ -14,7 +14,6 @@
 #include <cairo.h>
 #include <cairo-pdf.h>
 #include <cairo-svg.h>
-#include <cairo-win32.h>
 #include <librsvg/rsvg.h>
 #include <cjson/cJSON.h>
 
@@ -56,7 +55,6 @@
 #define IDM_ANNOT_ADD_POINT       1301
 #define IDM_ANNOT_ADD_RECT        1302
 #define IDM_ANNOT_ADD_POLY        1303
-#define IDM_ANNOT_ADD_ARROW       1304
 #define IDM_ANNOT_SAVE            1305
 #define IDM_ANNOT_LOAD            1306
 #define IDM_ANNOT_CLEAR           1307
@@ -69,15 +67,23 @@
 #define IDM_CTX_ATTACH_HERE       2001
 #define IDM_CTX_ANNOT_POINT_HERE  2002
 #define IDM_CTX_ANNOT_RECT_HERE   2003
-#define IDM_CTX_ANNOT_ARROW_HERE  2004
+#define IDM_CTX_ANNOT_POLY_HERE   2004
 #define IDM_CTX_HITTEST_BASE      3000
 
 // -------------------------------------------------------------
 // Data Structures
 // -------------------------------------------------------------
-typedef enum { PAPER_CUSTOM = 0, PAPER_A4, PAPER_A3, PAPER_LETTER } PaperSize;
+typedef enum {
+    PAPER_CUSTOM = 0,
+    PAPER_A4,
+    PAPER_A3,
+    PAPER_LETTER
+} PaperSize;
 
-typedef struct { double width_pt, height_pt; } PaperDimensions;
+typedef struct {
+    double width_pt;
+    double height_pt;
+} PaperDimensions;
 
 static PaperDimensions GetPaperDimensions(PaperSize size) {
     PaperDimensions pd;
@@ -131,24 +137,26 @@ typedef enum {
 
 typedef enum {
     DRAG_NONE = 0,
-    DRAG_BODY,           // Reposition whole annotation
-    DRAG_RECT_RESIZE,    // Resize Rect (bottom-right handle)
-    DRAG_POLY_VERTEX,    // Move individual polygon vertex
-    DRAG_CALLOUT         // Move callout arrow tip & text box
+    DRAG_BODY,
+    DRAG_RECT_RESIZE,
+    DRAG_POLY_VERTEX,
+    DRAG_CALLOUT
 } DragMode;
 
-typedef struct { double x, y; } Point2D;
+typedef struct {
+    double x, y;
+} Point2D;
 
 typedef struct {
     char id[64];
     AnnotType type;
     char text[256];
-    double x, y;             // Position (Point pos, Rect top-left, or Polygon origin)
-    double w, h;             // Dimensions for Rect
-    Point2D poly_points[32]; // Vertices for Polygon
+    double x, y;             // Point anchor, Rect top-left, or Polygon origin
+    double w, h;             // Width / Height for Rect
+    Point2D poly_points[32]; // Vertices for Polygon relative to (x, y)
     int num_points;
 
-    // Optional Callout attached to any annotation
+    // Optional Callout arrow & text
     bool has_callout;
     double callout_x, callout_y;
     char callout_text[256];
@@ -156,13 +164,21 @@ typedef struct {
 
 #pragma pack(push, 1)
 typedef struct {
-    uint16_t bfType; uint32_t bfSize; uint16_t bfReserved1, bfReserved2;
-    uint32_t bfOffBits, biSize; int32_t biWidth, biHeight;
-    uint16_t biPlanes, biBitCount; uint32_t biCompression, biSizeImage;
-    int32_t biXPelsPerMeter, biYPelsPerMeter; uint32_t biClrUsed, biClrImportant;
+    uint16_t bfType;
+    uint32_t bfSize;
+    uint16_t bfReserved1, bfReserved2;
+    uint32_t bfOffBits, biSize;
+    int32_t  biWidth, biHeight;
+    uint16_t biPlanes, biBitCount;
+    uint32_t biCompression, biSizeImage;
+    int32_t  biXPelsPerMeter, biYPelsPerMeter;
+    uint32_t biClrUsed, biClrImportant;
 } BMPHeader;
 
-typedef struct { uint16_t tag, type; uint32_t count, value_offset; } TiffTag;
+typedef struct {
+    uint16_t tag, type;
+    uint32_t count, value_offset;
+} TiffTag;
 #pragma pack(pop)
 
 typedef struct {
@@ -170,23 +186,26 @@ typedef struct {
     ViewState state;
     CRITICAL_SECTION cs;
 
+    // Multi-SVG Layers
     SvgLayer layers[MAX_LAYERS];
     int num_layers;
     char root_svg_path[MAX_PATH];
 
+    // Interactive Annotations
     Annotation annotations[MAX_ANNOTATIONS];
     int num_annotations;
     int selected_annot_idx;
+    DragMode drag_mode;
+    int active_vertex_idx;
+    double drag_offset_x, drag_offset_y;
 
-DragMode drag_mode;
-int active_vertex_idx;
-double drag_offset_x, drag_offset_y;
-
+    // Hit Testing & Context Menu Events
     HitTestArea hit_areas[MAX_HITTESTS];
     int num_hit_areas;
     ContextMenuEvent event_queue[MAX_EVENT_QUEUE];
     int num_events;
 
+    // Viewport & Cache
     bool is_panning;
     POINT last_mouse;
     cairo_surface_t* backbuffer_surface;
@@ -195,6 +214,7 @@ double drag_offset_x, drag_offset_y;
     bool cache_dirty;
     double cached_pan_x, cached_pan_y;
 
+    // Named Pipe Server
     wchar_t pipe_name[MAX_PATH];
     volatile LONG pipe_enabled;
     HANDLE h_pipe_thread;
@@ -205,27 +225,27 @@ static AppState g_app;
 
 // Forward declarations
 void InvalidateViewer(bool force_dirty);
-void ScreenToWorld(double sx, double sy, double* wx, double* wy) {
-    // 1. Center of viewport with pan offset
-    double cx = (g_app.backbuffer_w / 2.0) + g_app.state.pan_x;
-    double cy = (g_app.backbuffer_h / 2.0) + g_app.state.pan_y;
-    double dx = sx - cx;
-    double dy = sy - cy;
-
-    // 2. Inverse rotation (-theta)
-    double rad = -g_app.state.rotation_deg * M_PI / 180.0;
-    double rx = dx * cos(rad) - dy * sin(rad);
-    double ry = dx * sin(rad) + dy * cos(rad);
-
-    // 3. Inverse scale (zoom)
-    *wx = rx / g_app.state.zoom;
-    *wy = ry / g_app.state.zoom;
-}
+void ScreenToWorld(double sx, double sy, double* wx, double* wy);
 bool SaveAnnotationsJSON(const char* filepath);
 bool LoadAnnotationsJSON(const char* filepath);
 
 // -------------------------------------------------------------
-// Custom Win32 Input Dialog (No .rc file needed)
+// Coordinate Space Conversions
+// -------------------------------------------------------------
+void ScreenToWorld(double sx, double sy, double* wx, double* wy) {
+    double cx = (g_app.backbuffer_w / 2.0) + g_app.state.pan_x;
+    double cy = (g_app.backbuffer_h / 2.0) + g_app.state.pan_y;
+    double dx = sx - cx;
+    double dy = sy - cy;
+    double rad = -g_app.state.rotation_deg * M_PI / 180.0;
+    double rx = dx * cos(rad) - dy * sin(rad);
+    double ry = dx * sin(rad) + dy * cos(rad);
+    *wx = rx / g_app.state.zoom;
+    *wy = ry / g_app.state.zoom;
+}
+
+// -------------------------------------------------------------
+// Custom Win32 Input Dialog (No .rc required)
 // -------------------------------------------------------------
 typedef struct {
     const wchar_t* title;
@@ -242,10 +262,10 @@ static LRESULT CALLBACK InputDlgProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         p = (InputDlgParams*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)p);
 
-        CreateWindowW(L"STATIC", p->prompt, WS_CHILD | WS_VISIBLE, 15, 15, 350, 20, hwnd, NULL, NULL, NULL);
-        HWND hEdit = CreateWindowW(L"EDIT", p->text, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 15, 40, 350, 25, hwnd, (HMENU)101, NULL, NULL);
-        CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 180, 75, 80, 25, hwnd, (HMENU)IDOK, NULL, NULL);
-        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 270, 75, 80, 25, hwnd, (HMENU)IDCANCEL, NULL, NULL);
+        CreateWindowW(L"STATIC", p->prompt, WS_CHILD | WS_VISIBLE, 15, 15, 380, 20, hwnd, NULL, NULL, NULL);
+        HWND hEdit = CreateWindowW(L"EDIT", p->text, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 15, 40, 380, 25, hwnd, (HMENU)101, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 210, 75, 85, 25, hwnd, (HMENU)IDOK, NULL, NULL);
+        CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE, 310, 75, 85, 25, hwnd, (HMENU)IDCANCEL, NULL, NULL);
         SetFocus(hEdit);
         return 0;
     }
@@ -282,7 +302,7 @@ bool ShowTextInputDialog(HWND hParent, const wchar_t* title, const wchar_t* prom
     RegisterClassExW(&wc);
 
     HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, wc.lpszClassName, title, WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        CW_USEDEFAULT, CW_USEDEFAULT, 395, 145, hParent, NULL, wc.hInstance, &params);
+        CW_USEDEFAULT, CW_USEDEFAULT, 425, 145, hParent, NULL, wc.hInstance, &params);
 
     EnableWindow(hParent, FALSE);
     ShowWindow(hDlg, SW_SHOW);
@@ -303,7 +323,7 @@ bool ShowTextInputDialog(HWND hParent, const wchar_t* title, const wchar_t* prom
 }
 
 // -------------------------------------------------------------
-// Exporters & Snapshot Engine
+// Pure CPU Exporters (BMP, TIFF, PDF)
 // -------------------------------------------------------------
 bool SaveCairoSurfaceToBMP(cairo_surface_t* surface, const wchar_t* filepath) {
     int width = cairo_image_surface_get_width(surface);
@@ -380,7 +400,28 @@ bool SaveCairoSurfaceToTIFF(cairo_surface_t* surface, const wchar_t* filepath, i
     return true;
 }
 
-// Render vector canvas to target surface
+// -------------------------------------------------------------
+// Vector Drawing Engine
+// -------------------------------------------------------------
+void DrawArrow(cairo_t* cr, double from_x, double from_y, double to_x, double to_y) {
+    cairo_move_to(cr, from_x, from_y);
+    cairo_line_to(cr, to_x, to_y);
+    cairo_stroke(cr);
+
+    double angle = atan2(to_y - from_y, to_x - from_x);
+    double head_len = 12.0;
+
+    cairo_save(cr);
+    cairo_translate(cr, to_x, to_y);
+    cairo_rotate(cr, angle);
+    cairo_move_to(cr, 0, 0);
+    cairo_line_to(cr, -head_len, -head_len / 2.0);
+    cairo_line_to(cr, -head_len, head_len / 2.0);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    cairo_restore(cr);
+}
+
 void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px, double py) {
     cairo_save(cr);
     cairo_rectangle(cr, 0, 0, target_w, target_h);
@@ -394,7 +435,7 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
     cairo_rotate(cr, g_app.state.rotation_deg * M_PI / 180.0);
     cairo_scale(cr, g_app.state.zoom, g_app.state.zoom);
 
-    // SVG Layers
+    // 1. Render Multi-SVG Layers
     for (int i = 0; i < g_app.num_layers; ++i) {
         SvgLayer* l = &g_app.layers[i];
         if (!l->handle) continue;
@@ -406,15 +447,15 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
         cairo_restore(cr);
     }
 
-    // Annotations
+    // 2. Render Annotations
     for (int i = 0; i < g_app.num_annotations; ++i) {
         Annotation* a = &g_app.annotations[i];
         cairo_save(cr);
         cairo_select_font_face(cr, "Segoe UI", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
         cairo_set_font_size(cr, 13.0);
-    
+
         double anchor_x = a->x, anchor_y = a->y;
-    
+
         if (a->type == ANNOT_POINT) {
             cairo_set_source_rgba(cr, 0.9, 0.15, 0.15, 1.0);
             cairo_arc(cr, a->x, a->y, 5.0, 0, 2 * M_PI);
@@ -447,9 +488,13 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
             cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.9);
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
+            if (a->text[0]) {
+                cairo_move_to(cr, a->x + a->poly_points[0].x + 6.0, a->y + a->poly_points[0].y + 16.0);
+                cairo_show_text(cr, a->text);
+            }
         }
-    
-        // Render Optional Callout
+
+        // Render Callout Arrow & Text
         if (a->has_callout) {
             cairo_set_source_rgba(cr, 0.8, 0.2, 0.8, 0.9);
             cairo_set_line_width(cr, 1.5);
@@ -457,16 +502,14 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
             cairo_move_to(cr, a->callout_x + 6.0, a->callout_y + 4.0);
             cairo_show_text(cr, a->callout_text[0] ? a->callout_text : "Callout");
         }
-    
-        // Selection & Manipulation Handles
+
+        // Selection Handles
         if (i == g_app.selected_annot_idx) {
             cairo_set_source_rgba(cr, 1.0, 0.5, 0.0, 1.0);
             if (a->type == ANNOT_RECT) {
-                // Draw Resize Handle
                 cairo_rectangle(cr, a->x + a->w - 4.0, a->y + a->h - 4.0, 8.0, 8.0);
                 cairo_fill(cr);
             } else if (a->type == ANNOT_POLYGON) {
-                // Draw Vertex Handles
                 for (int p = 0; p < a->num_points; ++p) {
                     cairo_rectangle(cr, a->x + a->poly_points[p].x - 4.0, a->y + a->poly_points[p].y - 4.0, 8.0, 8.0);
                     cairo_fill(cr);
@@ -479,134 +522,13 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
         }
         cairo_restore(cr);
     }
-   
 
     cairo_restore(cr);
     cairo_restore(cr);
-}
-
-// File Export logic: Lock aspect crops content in red box; unlock fits viewport to paper.
-void TriggerExport(const wchar_t* path, int fmt) {
-    PaperDimensions pd = GetPaperDimensions(g_app.state.paper_size);
-    int out_w = (int)round((pd.width_pt / 72.0) * g_app.state.export_dpi);
-    int out_h = (int)round((pd.height_pt / 72.0) * g_app.state.export_dpi);
-
-    cairo_surface_t* surface = NULL;
-    char mbPath[MAX_PATH];
-    wcstombs(mbPath, path, MAX_PATH);
-
-    if (fmt == IDM_FILE_EXPORT_PDF) {
-        surface = cairo_pdf_surface_create(mbPath, pd.width_pt, pd.height_pt);
-        out_w = (int)pd.width_pt;
-        out_h = (int)pd.height_pt;
-    } else {
-        surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, out_w, out_h);
-    }
-
-    cairo_t* cr = cairo_create(surface);
-
-    if (g_app.state.lock_aspect_to_paper) {
-        // Render paper crop region
-        RenderVectorCanvas(cr, out_w, out_h, 0, 0);
-    } else {
-        // Fit viewport onto target paper dimensions
-        double sx = (double)out_w / (double)g_app.backbuffer_w;
-        double sy = (double)out_h / (double)g_app.backbuffer_h;
-        double scale = sx < sy ? sx : sy;
-
-        cairo_scale(cr, scale, scale);
-        RenderVectorCanvas(cr, g_app.backbuffer_w, g_app.backbuffer_h, g_app.state.pan_x, g_app.state.pan_y);
-    }
-
-    if (fmt == IDM_FILE_EXPORT_PDF) {
-        cairo_show_page(cr);
-    }
-
-    cairo_destroy(cr);
-    cairo_surface_flush(surface);
-
-    if (fmt == IDM_FILE_EXPORT_BMP) {
-        SaveCairoSurfaceToBMP(surface, path);
-    } else if (fmt == IDM_FILE_EXPORT_TIFF) {
-        SaveCairoSurfaceToTIFF(surface, path, g_app.state.export_dpi);
-    }
-    cairo_surface_destroy(surface);
-}
-
-// Snapshot logic: Captures viewport exactly, ignoring paper framing.
-// For BMP, captures full window including title bar / OS frame.
-void TriggerSnapshot(const wchar_t* path, int fmt) {
-    char mbPath[MAX_PATH];
-    wcstombs(mbPath, path, MAX_PATH);
-
-    if (fmt == IDM_FILE_SNAPSHOT_BMP) {
-        // Capture Full Window DC including Title Bar
-        RECT rc;
-        GetWindowRect(g_app.hwnd, &rc);
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-
-        HDC hdcWin = GetWindowDC(g_app.hwnd);
-        HDC hdcMem = CreateCompatibleDC(hdcWin);
-        HBITMAP hbm = CreateCompatibleBitmap(hdcWin, w, h);
-        SelectObject(hdcMem, hbm);
-
-        // PrintWindow grabs full window frame reliably
-        PrintWindow(g_app.hwnd, hdcMem, PW_RENDERFULLCONTENT);
-
-        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-        cairo_t* cr = cairo_create(surface);
-
-        // Blit from HBITMAP to Cairo
-        HDC hdcCairo = cairo_win32_surface_get_dc(cairo_win32_surface_create(hdcMem));
-        if (hdcCairo) {
-            BitBlt(hdcCairo, 0, 0, w, h, hdcMem, 0, 0, SRCCOPY);
-        } else {
-            // Fallback: software copy
-            BITMAPINFO bmi = { 0 };
-            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bmi.bmiHeader.biWidth = w;
-            bmi.bmiHeader.biHeight = -h;
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-            GetDIBits(hdcMem, hbm, 0, h, cairo_image_surface_get_data(surface), &bmi, DIB_RGB_COLORS);
-        }
-
-        cairo_destroy(cr);
-        cairo_surface_flush(surface);
-        SaveCairoSurfaceToBMP(surface, path);
-        cairo_surface_destroy(surface);
-
-        DeleteObject(hbm);
-        DeleteDC(hdcMem);
-        ReleaseDC(g_app.hwnd, hdcWin);
-    } else {
-        int w = g_app.backbuffer_w;
-        int h = g_app.backbuffer_h;
-        cairo_surface_t* surface = NULL;
-
-        if (fmt == IDM_FILE_SNAPSHOT_PDF) {
-            surface = cairo_pdf_surface_create(mbPath, w, h);
-        } else {
-            surface = cairo_svg_surface_create(mbPath, w, h);
-        }
-
-        cairo_t* cr = cairo_create(surface);
-        RenderVectorCanvas(cr, w, h, g_app.state.pan_x, g_app.state.pan_y);
-
-        if (fmt == IDM_FILE_SNAPSHOT_PDF) {
-            cairo_show_page(cr);
-        }
-
-        cairo_destroy(cr);
-        cairo_surface_flush(surface);
-        cairo_surface_destroy(surface);
-    }
 }
 
 // -------------------------------------------------------------
-// Interactive Annotation Engine
+// Interactive Annotation Helpers
 // -------------------------------------------------------------
 void InvalidateViewer(bool force_dirty) {
     if (force_dirty) g_app.cache_dirty = true;
@@ -621,7 +543,7 @@ int HitTestAnnotations(double wx, double wy, DragMode* out_mode, int* out_vertex
     for (int i = g_app.num_annotations - 1; i >= 0; --i) {
         Annotation* a = &g_app.annotations[i];
 
-        // 1. Check Callout Tip Handle
+        // 1. Callout Handle
         if (a->has_callout) {
             double dx = wx - a->callout_x, dy = wy - a->callout_y;
             if (sqrt(dx * dx + dy * dy) <= HANDLE_R) {
@@ -632,19 +554,16 @@ int HitTestAnnotations(double wx, double wy, DragMode* out_mode, int* out_vertex
 
         // 2. Type-Specific Handles & Body
         if (a->type == ANNOT_RECT) {
-            // Check Bottom-Right Resize Handle
             double hx = a->x + a->w, hy = a->y + a->h;
             if (sqrt((wx - hx) * (wx - hx) + (wy - hy) * (wy - hy)) <= HANDLE_R) {
                 *out_mode = DRAG_RECT_RESIZE;
                 return i;
             }
-            // Check Rect Body
             if (wx >= a->x && wx <= (a->x + a->w) && wy >= a->y && wy <= (a->y + a->h)) {
                 *out_mode = DRAG_BODY;
                 return i;
             }
         } else if (a->type == ANNOT_POLYGON) {
-            // Check Individual Vertices
             for (int p = 0; p < a->num_points; ++p) {
                 double vx = a->x + a->poly_points[p].x;
                 double vy = a->y + a->poly_points[p].y;
@@ -654,7 +573,6 @@ int HitTestAnnotations(double wx, double wy, DragMode* out_mode, int* out_vertex
                     return i;
                 }
             }
-            // Check Bounding Area
             if (fabs(wx - a->x) < 30.0 && fabs(wy - a->y) < 30.0) {
                 *out_mode = DRAG_BODY;
                 return i;
@@ -729,7 +647,7 @@ bool AttachSvgFile(const char* svguid, const char* filepath, double x, double y,
 }
 
 // -------------------------------------------------------------
-// Sidecar Annotation Persistence
+// Sidecar Annotation Persistence (-svgAnnotV0.json)
 // -------------------------------------------------------------
 void GetSidecarAnnotationPath(const char* svg_path, char* out_annot_path, size_t max_len) {
     strncpy_s(out_annot_path, max_len, svg_path, _TRUNCATE);
@@ -753,8 +671,10 @@ bool SaveAnnotationsJSON(const char* filepath) {
         cJSON_AddNumberToObject(obj, "y", a->y);
         cJSON_AddNumberToObject(obj, "w", a->w);
         cJSON_AddNumberToObject(obj, "h", a->h);
-        cJSON_AddNumberToObject(obj, "arrow_tip_x", a->arrow_tip_x);
-        cJSON_AddNumberToObject(obj, "arrow_tip_y", a->arrow_tip_y);
+        cJSON_AddBoolToObject(obj, "has_callout", a->has_callout);
+        cJSON_AddNumberToObject(obj, "callout_x", a->callout_x);
+        cJSON_AddNumberToObject(obj, "callout_y", a->callout_y);
+        cJSON_AddStringToObject(obj, "callout_text", a->callout_text);
 
         if (a->type == ANNOT_POLYGON) {
             cJSON* pts = cJSON_AddArrayToObject(obj, "points");
@@ -811,8 +731,10 @@ bool LoadAnnotationsJSON(const char* filepath) {
             a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "y"));
             a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "w"));
             a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "h"));
-            a->arrow_tip_x = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "arrow_tip_x"));
-            a->arrow_tip_y = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "arrow_tip_y"));
+            a->has_callout = cJSON_IsTrue(cJSON_GetObjectItem(item, "has_callout"));
+            a->callout_x = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "callout_x"));
+            a->callout_y = cJSON_GetNumberValue(cJSON_GetObjectItem(item, "callout_y"));
+            strncpy_s(a->callout_text, sizeof(a->callout_text), cJSON_GetStringValue(cJSON_GetObjectItem(item, "callout_text")), _TRUNCATE);
 
             cJSON* pts = cJSON_GetObjectItem(item, "points");
             if (cJSON_IsArray(pts)) {
@@ -835,7 +757,111 @@ bool LoadAnnotationsJSON(const char* filepath) {
 }
 
 // -------------------------------------------------------------
-// Win32 Menu Bar Creation
+// Exporters & Snapshot Logic
+// -------------------------------------------------------------
+void TriggerExport(const wchar_t* path, int fmt) {
+    PaperDimensions pd = GetPaperDimensions(g_app.state.paper_size);
+    int out_w = (int)round((pd.width_pt / 72.0) * g_app.state.export_dpi);
+    int out_h = (int)round((pd.height_pt / 72.0) * g_app.state.export_dpi);
+
+    cairo_surface_t* surface = NULL;
+    char mbPath[MAX_PATH];
+    wcstombs(mbPath, path, MAX_PATH);
+
+    if (fmt == IDM_FILE_EXPORT_PDF) {
+        surface = cairo_pdf_surface_create(mbPath, pd.width_pt, pd.height_pt);
+        out_w = (int)pd.width_pt;
+        out_h = (int)pd.height_pt;
+    } else {
+        surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, out_w, out_h);
+    }
+
+    cairo_t* cr = cairo_create(surface);
+
+    if (g_app.state.lock_aspect_to_paper) {
+        // Render content in red paper frame
+        RenderVectorCanvas(cr, out_w, out_h, 0, 0);
+    } else {
+        // Fit full viewport onto target paper
+        double sx = (double)out_w / (double)g_app.backbuffer_w;
+        double sy = (double)out_h / (double)g_app.backbuffer_h;
+        double scale = sx < sy ? sx : sy;
+        cairo_scale(cr, scale, scale);
+        RenderVectorCanvas(cr, g_app.backbuffer_w, g_app.backbuffer_h, g_app.state.pan_x, g_app.state.pan_y);
+    }
+
+    if (fmt == IDM_FILE_EXPORT_PDF) cairo_show_page(cr);
+
+    cairo_destroy(cr);
+    cairo_surface_flush(surface);
+
+    if (fmt == IDM_FILE_EXPORT_BMP) {
+        SaveCairoSurfaceToBMP(surface, path);
+    } else if (fmt == IDM_FILE_EXPORT_TIFF) {
+        SaveCairoSurfaceToTIFF(surface, path, g_app.state.export_dpi);
+    }
+    cairo_surface_destroy(surface);
+}
+
+void TriggerSnapshot(const wchar_t* path, int fmt) {
+    char mbPath[MAX_PATH];
+    wcstombs(mbPath, path, MAX_PATH);
+
+    if (fmt == IDM_FILE_SNAPSHOT_BMP) {
+        // Full Window capture including Title Bar
+        RECT rc;
+        GetWindowRect(g_app.hwnd, &rc);
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+
+        HDC hdcWin = GetWindowDC(g_app.hwnd);
+        HDC hdcMem = CreateCompatibleDC(hdcWin);
+        HBITMAP hbm = CreateCompatibleBitmap(hdcWin, w, h);
+        SelectObject(hdcMem, hbm);
+
+        PrintWindow(g_app.hwnd, hdcMem, PW_RENDERFULLCONTENT);
+
+        cairo_surface_t* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        BITMAPINFO bmi = { 0 };
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        GetDIBits(hdcMem, hbm, 0, h, cairo_image_surface_get_data(surface), &bmi, DIB_RGB_COLORS);
+
+        cairo_surface_flush(surface);
+        SaveCairoSurfaceToBMP(surface, path);
+        cairo_surface_destroy(surface);
+
+        DeleteObject(hbm);
+        DeleteDC(hdcMem);
+        ReleaseDC(g_app.hwnd, hdcWin);
+    } else {
+        int w = g_app.backbuffer_w;
+        int h = g_app.backbuffer_h;
+        cairo_surface_t* surface = NULL;
+
+        if (fmt == IDM_FILE_SNAPSHOT_PDF) {
+            surface = cairo_pdf_surface_create(mbPath, w, h);
+        } else {
+            surface = cairo_svg_surface_create(mbPath, w, h);
+        }
+
+        cairo_t* cr = cairo_create(surface);
+        RenderVectorCanvas(cr, w, h, g_app.state.pan_x, g_app.state.pan_y);
+
+        if (fmt == IDM_FILE_SNAPSHOT_PDF) cairo_show_page(cr);
+
+        cairo_destroy(cr);
+        cairo_surface_flush(surface);
+        cairo_surface_destroy(surface);
+    }
+}
+
+// -------------------------------------------------------------
+// Menus & Context Menu Dispatcher
 // -------------------------------------------------------------
 void CreateApplicationMenu(HWND hwnd) {
     HMENU hMenuBar = CreateMenu();
@@ -886,7 +912,6 @@ void CreateApplicationMenu(HWND hwnd) {
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POINT, L"Add Point Marker Text");
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_RECT, L"Add Box Area Text");
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_POLY, L"Add Polygon Area");
-    AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_ADD_ARROW, L"Add Arrow Callout");
     AppendMenuW(hAnnot, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_DELETE_SELECTED, L"Delete Selected Annotation\tDel");
     AppendMenuW(hAnnot, MF_STRING, IDM_ANNOT_SAVE, L"&Save Sidecar Annotations (-svgAnnotV0.json)");
@@ -907,7 +932,7 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
     double wx = 0.0, wy = 0.0;
     ScreenToWorld(mx, my, &wx, &wy);
 
-    // Hit test custom hit areas
+    // 1. Hit Test Custom Hit Areas
     for (int i = g_app.num_hit_areas - 1; i >= 0; --i) {
         HitTestArea* h = &g_app.hit_areas[i];
         double tx = wx, ty = wy;
@@ -944,12 +969,12 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
         }
     }
 
-    // Default Canvas Context Menu
+    // 2. Default Canvas Context Menu
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_ATTACH_HERE, L"Attach SVG File Here...");
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_POINT_HERE, L"Add Point Text Here");
     AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_RECT_HERE, L"Add Box Text Here");
-    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_ARROW_HERE, L"Add Arrow Callout Here");
+    AppendMenuW(hMenu, MF_STRING, IDM_CTX_ANNOT_POLY_HERE, L"Add Triangle Polygon Here");
 
     POINT pt = { mx, my }; ClientToScreen(hwnd, &pt);
     LeaveCriticalSection(&g_app.cs);
@@ -969,14 +994,28 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
             char uid[64]; snprintf(uid, sizeof(uid), "layer_%d", g_app.num_layers + 1);
             AttachSvgFile(uid, mbFile, wx, wy, 1.0, 0.0);
         }
-    } else if (cmd == IDM_CTX_ANNOT_POINT_HERE || cmd == IDM_CTX_ANNOT_RECT_HERE || cmd == IDM_CTX_ANNOT_ARROW_HERE) {
+    } else if (cmd == IDM_CTX_ANNOT_POINT_HERE || cmd == IDM_CTX_ANNOT_RECT_HERE || cmd == IDM_CTX_ANNOT_POLY_HERE) {
         if (g_app.num_annotations < MAX_ANNOTATIONS) {
             Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            memset(a, 0, sizeof(Annotation));
             snprintf(a->id, sizeof(a->id), "annot_%d", g_app.num_annotations);
             a->x = wx; a->y = wy;
-            if (cmd == IDM_CTX_ANNOT_POINT_HERE) { a->type = ANNOT_POINT_TEXT; strncpy_s(a->text, sizeof(a->text), "Point Marker", _TRUNCATE); }
-            else if (cmd == IDM_CTX_ANNOT_RECT_HERE) { a->type = ANNOT_RECT_TEXT; a->w = 120; a->h = 60; strncpy_s(a->text, sizeof(a->text), "Box Area", _TRUNCATE); }
-            else { a->type = ANNOT_ARROW; a->arrow_tip_x = wx + 50; a->arrow_tip_y = wy - 50; strncpy_s(a->text, sizeof(a->text), "Callout", _TRUNCATE); }
+
+            if (cmd == IDM_CTX_ANNOT_POINT_HERE) {
+                a->type = ANNOT_POINT;
+                strncpy_s(a->text, sizeof(a->text), "Point Marker", _TRUNCATE);
+            } else if (cmd == IDM_CTX_ANNOT_RECT_HERE) {
+                a->type = ANNOT_RECT;
+                a->w = 120; a->h = 60;
+                strncpy_s(a->text, sizeof(a->text), "Box Area", _TRUNCATE);
+            } else {
+                a->type = ANNOT_POLYGON;
+                a->num_points = 3;
+                a->poly_points[0] = (Point2D){ 0, -40 };
+                a->poly_points[1] = (Point2D){ 40, 40 };
+                a->poly_points[2] = (Point2D){ -40, 40 };
+                strncpy_s(a->text, sizeof(a->text), "Polygon Area", _TRUNCATE);
+            }
             g_app.selected_annot_idx = g_app.num_annotations - 1;
             InvalidateViewer(true);
         }
@@ -984,7 +1023,7 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
 }
 
 // -------------------------------------------------------------
-// cJSON JSON-RPC Protocol Dispatcher
+// cJSON-Powered JSON-RPC Protocol Dispatcher
 // -------------------------------------------------------------
 void ExecuteRPC(const char* raw_json, char* response, size_t max_resp) {
     EnterCriticalSection(&g_app.cs);
@@ -1014,6 +1053,36 @@ void ExecuteRPC(const char* raw_json, char* response, size_t max_resp) {
         } else {
             snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"failed to parse svg string\"}\n");
         }
+    } else if (strcmp(cmd_name, "load_svg_file") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        const char* filepath = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        double x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+        double y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+        double scale = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "scale"));
+        double rot = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "rotation"));
+        if (!svguid) svguid = "root";
+
+        if (filepath && AttachSvgFile(svguid, filepath, x, y, scale, rot)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"svguid\":\"%s\"}\n", svguid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"failed to load file\"}\n");
+        }
+    } else if (strcmp(cmd_name, "remove_svg") == 0) {
+        const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+        if (svguid) {
+            RemoveSvgInternal(svguid);
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"removed\":\"%s\"}\n", svguid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"missing svguid\"}\n");
+        }
+    } else if (strcmp(cmd_name, "clear_layers") == 0) {
+        for (int i = 0; i < g_app.num_layers; ++i) {
+            if (g_app.layers[i].handle) g_object_unref(g_app.layers[i].handle);
+        }
+        g_app.num_layers = 0;
+        InvalidateViewer(true);
+        snprintf(response, max_resp, "{\"status\":\"ok\",\"cleared\":true}\n");
     } else if (strcmp(cmd_name, "snapshot") == 0) {
         const char* filepath = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
         const char* fmt = cJSON_GetStringValue(cJSON_GetObjectItem(root, "format"));
@@ -1035,144 +1104,157 @@ void ExecuteRPC(const char* raw_json, char* response, size_t max_resp) {
         } else {
             snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"missing pipe_name\"}\n");
         }
-    } 
+    } else if (strcmp(cmd_name, "add_annotation") == 0) {
+        if (g_app.num_annotations < MAX_ANNOTATIONS) {
+            Annotation* a = &g_app.annotations[g_app.num_annotations++];
+            memset(a, 0, sizeof(Annotation));
 
-    else if (strcmp(cmd_name, "add_annotation") == 0) {
-    if (g_app.num_annotations < MAX_ANNOTATIONS) {
-        Annotation* a = &g_app.annotations[g_app.num_annotations++];
-        memset(a, 0, sizeof(Annotation));
+            const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+            const char* type_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "type"));
+            const char* text = cJSON_GetStringValue(cJSON_GetObjectItem(root, "text"));
 
-        const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
-        const char* type_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "type"));
-        const char* text = cJSON_GetStringValue(cJSON_GetObjectItem(root, "text"));
+            if (uid) strncpy_s(a->id, sizeof(a->id), uid, _TRUNCATE);
+            if (text) strncpy_s(a->text, sizeof(a->text), text, _TRUNCATE);
 
-        if (uid) strncpy_s(a->id, sizeof(a->id), uid, _TRUNCATE);
-        if (text) strncpy_s(a->text, sizeof(a->text), text, _TRUNCATE);
+            a->x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+            a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+            a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "w"));
+            a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "h"));
 
-        a->x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
-        a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
-        a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "w"));
-        a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "h"));
-
-        if (type_str && strcmp(type_str, "rect") == 0) {
-            a->type = ANNOT_RECT;
-            if (a->w <= 0) a->w = 100;
-            if (a->h <= 0) a->h = 50;
-        } else if (type_str && strcmp(type_str, "polygon") == 0) {
-            a->type = ANNOT_POLYGON;
-            cJSON* pts = cJSON_GetObjectItem(root, "points");
-            if (cJSON_IsArray(pts)) {
-                cJSON* p = NULL;
-                a->num_points = 0;
-                cJSON_ArrayForEach(p, pts) {
-                    if (a->num_points < 32 && cJSON_IsArray(p) && cJSON_GetArraySize(p) >= 2) {
-                        a->poly_points[a->num_points].x = cJSON_GetArrayItem(p, 0)->valuedouble;
-                        a->poly_points[a->num_points].y = cJSON_GetArrayItem(p, 1)->valuedouble;
-                        a->num_points++;
+            if (type_str && strcmp(type_str, "rect") == 0) {
+                a->type = ANNOT_RECT;
+                if (a->w <= 0) a->w = 100;
+                if (a->h <= 0) a->h = 50;
+            } else if (type_str && strcmp(type_str, "polygon") == 0) {
+                a->type = ANNOT_POLYGON;
+                cJSON* pts = cJSON_GetObjectItem(root, "points");
+                if (cJSON_IsArray(pts)) {
+                    cJSON* p = NULL;
+                    a->num_points = 0;
+                    cJSON_ArrayForEach(p, pts) {
+                        if (a->num_points < 32 && cJSON_IsArray(p) && cJSON_GetArraySize(p) >= 2) {
+                            a->poly_points[a->num_points].x = cJSON_GetArrayItem(p, 0)->valuedouble;
+                            a->poly_points[a->num_points].y = cJSON_GetArrayItem(p, 1)->valuedouble;
+                            a->num_points++;
+                        }
                     }
                 }
-            }
-        } else {
-            a->type = ANNOT_POINT;
-        }
-
-        // Optional Callout Config
-        cJSON* callout = cJSON_GetObjectItem(root, "callout");
-        if (cJSON_IsObject(callout)) {
-            a->has_callout = true;
-            a->callout_x = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "x"));
-            a->callout_y = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "y"));
-            const char* ctext = cJSON_GetStringValue(cJSON_GetObjectItem(callout, "text"));
-            if (ctext) strncpy_s(a->callout_text, sizeof(a->callout_text), ctext, _TRUNCATE);
-        }
-
-        InvalidateViewer(true);
-        snprintf(response, max_resp, "{\"status\":\"ok\",\"annot_id\":\"%s\"}\n", a->id);
-    }
-}
-// 2. UPDATE ANNOTATION
-else if (strcmp(cmd_name, "update_annotation") == 0) {
-    const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
-    bool found = false;
-    for (int i = 0; i < g_app.num_annotations; ++i) {
-        if (id && strcmp(g_app.annotations[i].id, id) == 0) {
-            Annotation* a = &g_app.annotations[i];
-            cJSON* text = cJSON_GetObjectItem(root, "text");
-            cJSON* x = cJSON_GetObjectItem(root, "x");
-            cJSON* y = cJSON_GetObjectItem(root, "y");
-            cJSON* w = cJSON_GetObjectItem(root, "w");
-            cJSON* h = cJSON_GetObjectItem(root, "h");
-
-            if (text) strncpy_s(a->text, sizeof(a->text), text->valuestring, _TRUNCATE);
-            if (x) a->x = x->valuedouble;
-            if (y) a->y = y->valuedouble;
-            if (w) a->w = w->valuedouble;
-            if (h) a->h = h->valuedouble;
-
-            // Vertex Editing for Polygon
-            cJSON* v_idx = cJSON_GetObjectItem(root, "vertex_index");
-            cJSON* vx = cJSON_GetObjectItem(root, "vertex_x");
-            cJSON* vy = cJSON_GetObjectItem(root, "vertex_y");
-            if (a->type == ANNOT_POLYGON && v_idx && vx && vy) {
-                int idx = (int)v_idx->valuedouble;
-                if (idx >= 0 && idx < a->num_points) {
-                    a->poly_points[idx].x = vx->valuedouble;
-                    a->poly_points[idx].y = vy->valuedouble;
-                }
+            } else {
+                a->type = ANNOT_POINT;
             }
 
-            // Callout Update
+            // Optional Callout Config
             cJSON* callout = cJSON_GetObjectItem(root, "callout");
             if (cJSON_IsObject(callout)) {
                 a->has_callout = true;
-                cJSON* cx = cJSON_GetObjectItem(callout, "x");
-                cJSON* cy = cJSON_GetObjectItem(callout, "y");
-                cJSON* ct = cJSON_GetObjectItem(callout, "text");
-                if (cx) a->callout_x = cx->valuedouble;
-                if (cy) a->callout_y = cy->valuedouble;
-                if (ct) strncpy_s(a->callout_text, sizeof(a->callout_text), ct->valuestring, _TRUNCATE);
+                a->callout_x = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "x"));
+                a->callout_y = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "y"));
+                const char* ctext = cJSON_GetStringValue(cJSON_GetObjectItem(callout, "text"));
+                if (ctext) strncpy_s(a->callout_text, sizeof(a->callout_text), ctext, _TRUNCATE);
             }
-            found = true;
-            InvalidateViewer(true);
-            snprintf(response, max_resp, "{\"status\":\"ok\",\"id\":\"%s\"}\n", id);
-            break;
-        }
-    }
-    if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"not found\"}\n");
-}
-// 3. DELETE ANNOTATION
-else if (strcmp(cmd_name, "delete_annotation") == 0) {
-    const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
-    bool found = false;
-    for (int i = 0; i < g_app.num_annotations; ++i) {
-        if (id && strcmp(g_app.annotations[i].id, id) == 0) {
-            for (int j = i; j < g_app.num_annotations - 1; ++j) {
-                g_app.annotations[j] = g_app.annotations[j + 1];
-            }
-            g_app.num_annotations--;
-            g_app.selected_annot_idx = -1;
-            found = true;
-            InvalidateViewer(true);
-            snprintf(response, max_resp, "{\"status\":\"ok\",\"deleted\":\"%s\"}\n", id);
-            break;
-        }
-    }
-    if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"not found\"}\n");
-}
-    
-    else if (strcmp(cmd_name, "get_viewport") == 0) {
-        const char* paper_str = "A4";
-        if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
-        else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
-        else if (g_app.state.paper_size == PAPER_CUSTOM) paper_str = "Custom";
 
-        snprintf(response, max_resp,
-            "{\"status\":\"ok\",\"viewport\":{\"zoom\":%f,\"pan_x\":%f,\"pan_y\":%f,\"rotation_deg\":%f,"
-            "\"aspect_locked\":%s,\"export_paper_size\":\"%s\",\"export_dpi\":%d,"
-            "\"canvas_width\":%d,\"canvas_height\":%d}}\n",
-            g_app.state.zoom, g_app.state.pan_x, g_app.state.pan_y, g_app.state.rotation_deg,
-            g_app.state.lock_aspect_to_paper ? "true" : "false", paper_str, g_app.state.export_dpi,
-            g_app.backbuffer_w, g_app.backbuffer_h);
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"annot_id\":\"%s\"}\n", a->id);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"max annotations reached\"}\n");
+        }
+    } else if (strcmp(cmd_name, "update_annotation") == 0) {
+        const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+        bool found = false;
+        for (int i = 0; i < g_app.num_annotations; ++i) {
+            if (id && strcmp(g_app.annotations[i].id, id) == 0) {
+                Annotation* a = &g_app.annotations[i];
+                cJSON* text = cJSON_GetObjectItem(root, "text");
+                cJSON* x = cJSON_GetObjectItem(root, "x");
+                cJSON* y = cJSON_GetObjectItem(root, "y");
+                cJSON* w = cJSON_GetObjectItem(root, "w");
+                cJSON* h = cJSON_GetObjectItem(root, "h");
+
+                if (text) strncpy_s(a->text, sizeof(a->text), text->valuestring, _TRUNCATE);
+                if (x) a->x = x->valuedouble;
+                if (y) a->y = y->valuedouble;
+                if (w) a->w = w->valuedouble;
+                if (h) a->h = h->valuedouble;
+
+                // Vertex Editing for Polygon
+                cJSON* v_idx = cJSON_GetObjectItem(root, "vertex_index");
+                cJSON* vx = cJSON_GetObjectItem(root, "vertex_x");
+                cJSON* vy = cJSON_GetObjectItem(root, "vertex_y");
+                if (a->type == ANNOT_POLYGON && v_idx && vx && vy) {
+                    int idx = (int)v_idx->valuedouble;
+                    if (idx >= 0 && idx < a->num_points) {
+                        a->poly_points[idx].x = vx->valuedouble;
+                        a->poly_points[idx].y = vy->valuedouble;
+                    }
+                }
+
+                // Callout Update
+                cJSON* callout = cJSON_GetObjectItem(root, "callout");
+                if (cJSON_IsObject(callout)) {
+                    a->has_callout = true;
+                    cJSON* cx = cJSON_GetObjectItem(callout, "x");
+                    cJSON* cy = cJSON_GetObjectItem(callout, "y");
+                    cJSON* ct = cJSON_GetObjectItem(callout, "text");
+                    if (cx) a->callout_x = cx->valuedouble;
+                    if (cy) a->callout_y = cy->valuedouble;
+                    if (ct) strncpy_s(a->callout_text, sizeof(a->callout_text), ct->valuestring, _TRUNCATE);
+                }
+                found = true;
+                InvalidateViewer(true);
+                snprintf(response, max_resp, "{\"status\":\"ok\",\"id\":\"%s\"}\n", id);
+                break;
+            }
+        }
+        if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"annotation not found\"}\n");
+    } else if (strcmp(cmd_name, "delete_annotation") == 0) {
+        const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+        bool found = false;
+        for (int i = 0; i < g_app.num_annotations; ++i) {
+            if (id && strcmp(g_app.annotations[i].id, id) == 0) {
+                for (int j = i; j < g_app.num_annotations - 1; ++j) {
+                    g_app.annotations[j] = g_app.annotations[j + 1];
+                }
+                g_app.num_annotations--;
+                g_app.selected_annot_idx = -1;
+                found = true;
+                InvalidateViewer(true);
+                snprintf(response, max_resp, "{\"status\":\"ok\",\"deleted\":\"%s\"}\n", id);
+                break;
+            }
+        }
+        if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"annotation not found\"}\n");
+    } else if (strcmp(cmd_name, "add_hit_test") == 0) {
+        if (g_app.num_hit_areas < MAX_HITTESTS) {
+            HitTestArea* h = &g_app.hit_areas[g_app.num_hit_areas++];
+            memset(h, 0, sizeof(HitTestArea));
+
+            const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "hittest_uid"));
+            const char* svguid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "svguid"));
+            if (uid) strncpy_s(h->hittest_uid, sizeof(h->hittest_uid), uid, _TRUNCATE);
+            if (svguid) strncpy_s(h->svguid, sizeof(h->svguid), svguid, _TRUNCATE);
+
+            cJSON* rect = cJSON_GetObjectItem(root, "rect");
+            if (cJSON_IsArray(rect) && cJSON_GetArraySize(rect) == 4) {
+                h->x = cJSON_GetArrayItem(rect, 0)->valuedouble;
+                h->y = cJSON_GetArrayItem(rect, 1)->valuedouble;
+                h->w = cJSON_GetArrayItem(rect, 2)->valuedouble;
+                h->h = cJSON_GetArrayItem(rect, 3)->valuedouble;
+            }
+
+            cJSON* cmds = cJSON_GetObjectItem(root, "context_menu_commands");
+            if (cJSON_IsArray(cmds)) {
+                cJSON* item = NULL;
+                h->num_commands = 0;
+                cJSON_ArrayForEach(item, cmds) {
+                    if (cJSON_IsString(item) && h->num_commands < 8) {
+                        strncpy_s(h->commands[h->num_commands++], 64, item->valuestring, _TRUNCATE);
+                    }
+                }
+            }
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"hittest_uid\":\"%s\"}\n", h->hittest_uid);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"max hit tests reached\"}\n");
+        }
     } else if (strcmp(cmd_name, "drain_context_menu_command_queue") == 0) {
         cJSON* resp = cJSON_CreateObject();
         cJSON_AddStringToObject(resp, "status", "ok");
@@ -1188,6 +1270,60 @@ else if (strcmp(cmd_name, "delete_annotation") == 0) {
         snprintf(response, max_resp, "%s\n", printed);
         free(printed);
         cJSON_Delete(resp);
+    } else if (strcmp(cmd_name, "get_viewport") == 0) {
+        const char* paper_str = "A4";
+        if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
+        else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
+        else if (g_app.state.paper_size == PAPER_CUSTOM) paper_str = "Custom";
+
+        snprintf(response, max_resp,
+            "{\"status\":\"ok\",\"viewport\":{\"zoom\":%f,\"pan_x\":%f,\"pan_y\":%f,\"rotation_deg\":%f,"
+            "\"aspect_locked\":%s,\"export_paper_size\":\"%s\",\"export_dpi\":%d,"
+            "\"canvas_width\":%d,\"canvas_height\":%d}}\n",
+            g_app.state.zoom, g_app.state.pan_x, g_app.state.pan_y, g_app.state.rotation_deg,
+            g_app.state.lock_aspect_to_paper ? "true" : "false", paper_str, g_app.state.export_dpi,
+            g_app.backbuffer_w, g_app.backbuffer_h);
+    } else if (strcmp(cmd_name, "set_viewport") == 0) {
+        cJSON* z = cJSON_GetObjectItem(root, "zoom");
+        cJSON* px = cJSON_GetObjectItem(root, "pan_x");
+        cJSON* py = cJSON_GetObjectItem(root, "pan_y");
+        cJSON* rot = cJSON_GetObjectItem(root, "rotation_deg");
+        cJSON* dpi = cJSON_GetObjectItem(root, "export_dpi");
+        cJSON* aspect = cJSON_GetObjectItem(root, "aspect_locked");
+
+        if (z) g_app.state.zoom = z->valuedouble;
+        if (px) g_app.state.pan_x = px->valuedouble;
+        if (py) g_app.state.pan_y = py->valuedouble;
+        if (rot) g_app.state.rotation_deg = rot->valuedouble;
+        if (dpi) g_app.state.export_dpi = (int)dpi->valuedouble;
+        if (aspect) g_app.state.lock_aspect_to_paper = cJSON_IsTrue(aspect);
+
+        InvalidateViewer(true);
+        snprintf(response, max_resp, "{\"status\":\"ok\"}\n");
+    } else if (strcmp(cmd_name, "save_annotations") == 0) {
+        const char* path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        char sidecar[MAX_PATH];
+        if (!path) {
+            GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
+            path = sidecar;
+        }
+        if (SaveAnnotationsJSON(path)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"path\":\"%s\"}\n", path);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"save failed\"}\n");
+        }
+    } else if (strcmp(cmd_name, "load_annotations") == 0) {
+        const char* path = cJSON_GetStringValue(cJSON_GetObjectItem(root, "filepath"));
+        char sidecar[MAX_PATH];
+        if (!path) {
+            GetSidecarAnnotationPath(g_app.root_svg_path, sidecar, sizeof(sidecar));
+            path = sidecar;
+        }
+        if (LoadAnnotationsJSON(path)) {
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"loaded\":%d}\n", g_app.num_annotations);
+        } else {
+            snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"load failed\"}\n");
+        }
     } else {
         snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"unknown command\"}\n");
     }
@@ -1196,7 +1332,9 @@ else if (strcmp(cmd_name, "delete_annotation") == 0) {
     LeaveCriticalSection(&g_app.cs);
 }
 
+// -------------------------------------------------------------
 // Named Pipe Worker Thread
+// -------------------------------------------------------------
 DWORD WINAPI NamedPipeServerThread(LPVOID lpParam) {
     while (InterlockedCompareExchange(&g_app.rpc_running, 1, 1)) {
         if (!InterlockedCompareExchange(&g_app.pipe_enabled, 1, 1)) { Sleep(200); continue; }
@@ -1392,8 +1530,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDBLCLK: {
         double wx = 0, wy = 0;
         ScreenToWorld(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &wx, &wy);
-        bool hit_arrow = false;
-        int idx = HitTestAnnotations(wx, wy, &hit_arrow);
+        DragMode mode = DRAG_NONE; int v_idx = -1;
+        int idx = HitTestAnnotations(wx, wy, &mode, &v_idx);
         if (idx >= 0) {
             Annotation* a = &g_app.annotations[idx];
             wchar_t text[256]; mbstowcs(text, a->text, 256);
@@ -1404,77 +1542,70 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
-        
-case WM_LBUTTONDOWN: {
-    double wx = 0, wy = 0;
-    ScreenToWorld(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &wx, &wy);
-    DragMode mode = DRAG_NONE;
-    int v_idx = -1;
-    int idx = HitTestAnnotations(wx, wy, &mode, &v_idx);
-
-    if (idx >= 0) {
-        g_app.selected_annot_idx = idx;
-        g_app.drag_mode = mode;
-        g_app.active_vertex_idx = v_idx;
-        g_app.drag_offset_x = wx - g_app.annotations[idx].x;
-        g_app.drag_offset_y = wy - g_app.annotations[idx].y;
-        SetCapture(hwnd);
-        InvalidateViewer(true);
-    } else {
-        g_app.selected_annot_idx = -1;
-        g_app.drag_mode = DRAG_NONE;
-        g_app.is_panning = true;
-        g_app.last_mouse.x = GET_X_LPARAM(lParam);
-        g_app.last_mouse.y = GET_Y_LPARAM(lParam);
-        SetCapture(hwnd);
-        InvalidateViewer(true);
-    }
-    return 0;
-}
-
-case WM_MOUSEMOVE: {
-    int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
-    if (g_app.drag_mode != DRAG_NONE && g_app.selected_annot_idx >= 0) {
+    case WM_LBUTTONDOWN: {
         double wx = 0, wy = 0;
-        ScreenToWorld(mx, my, &wx, &wy);
-        Annotation* a = &g_app.annotations[g_app.selected_annot_idx];
+        ScreenToWorld(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &wx, &wy);
+        DragMode mode = DRAG_NONE; int v_idx = -1;
+        int idx = HitTestAnnotations(wx, wy, &mode, &v_idx);
 
-        if (g_app.drag_mode == DRAG_BODY) {
-            a->x = wx - g_app.drag_offset_x;
-            a->y = wy - g_app.drag_offset_y;
-        } else if (g_app.drag_mode == DRAG_RECT_RESIZE && a->type == ANNOT_RECT) {
-            a->w = (wx - a->x) > 10.0 ? (wx - a->x) : 10.0;
-            a->h = (wy - a->y) > 10.0 ? (wy - a->y) : 10.0;
-        } else if (g_app.drag_mode == DRAG_POLY_VERTEX && a->type == ANNOT_POLYGON && g_app.active_vertex_idx >= 0) {
-            a->poly_points[g_app.active_vertex_idx].x = wx - a->x;
-            a->poly_points[g_app.active_vertex_idx].y = wy - a->y;
-        } else if (g_app.drag_mode == DRAG_CALLOUT) {
-            a->callout_x = wx;
-            a->callout_y = wy;
+        if (idx >= 0) {
+            g_app.selected_annot_idx = idx;
+            g_app.drag_mode = mode;
+            g_app.active_vertex_idx = v_idx;
+            g_app.drag_offset_x = wx - g_app.annotations[idx].x;
+            g_app.drag_offset_y = wy - g_app.annotations[idx].y;
+            SetCapture(hwnd);
+            InvalidateViewer(true);
+        } else {
+            g_app.selected_annot_idx = -1;
+            g_app.drag_mode = DRAG_NONE;
+            g_app.is_panning = true;
+            g_app.last_mouse.x = GET_X_LPARAM(lParam);
+            g_app.last_mouse.y = GET_Y_LPARAM(lParam);
+            SetCapture(hwnd);
+            InvalidateViewer(true);
         }
-        InvalidateViewer(true);
-    } else if (g_app.is_panning) {
-        g_app.state.pan_x += (mx - g_app.last_mouse.x);
-        g_app.state.pan_y += (my - g_app.last_mouse.y);
-        g_app.last_mouse.x = mx;
-        g_app.last_mouse.y = my;
-        InvalidateViewer(false);
+        return 0;
     }
-    return 0;
-}
+    case WM_MOUSEMOVE: {
+        int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
+        if (g_app.drag_mode != DRAG_NONE && g_app.selected_annot_idx >= 0) {
+            double wx = 0, wy = 0; ScreenToWorld(mx, my, &wx, &wy);
+            Annotation* a = &g_app.annotations[g_app.selected_annot_idx];
 
-case WM_LBUTTONUP:
-    if (g_app.drag_mode != DRAG_NONE) {
-        g_app.drag_mode = DRAG_NONE;
-        ReleaseCapture();
-        InvalidateViewer(true);
-    } else if (g_app.is_panning) {
-        g_app.is_panning = false;
-        ReleaseCapture();
-        InvalidateViewer(true);
+            if (g_app.drag_mode == DRAG_BODY) {
+                a->x = wx - g_app.drag_offset_x;
+                a->y = wy - g_app.drag_offset_y;
+            } else if (g_app.drag_mode == DRAG_RECT_RESIZE && a->type == ANNOT_RECT) {
+                a->w = (wx - a->x) > 10.0 ? (wx - a->x) : 10.0;
+                a->h = (wy - a->y) > 10.0 ? (wy - a->y) : 10.0;
+            } else if (g_app.drag_mode == DRAG_POLY_VERTEX && a->type == ANNOT_POLYGON && g_app.active_vertex_idx >= 0) {
+                a->poly_points[g_app.active_vertex_idx].x = wx - a->x;
+                a->poly_points[g_app.active_vertex_idx].y = wy - a->y;
+            } else if (g_app.drag_mode == DRAG_CALLOUT) {
+                a->callout_x = wx;
+                a->callout_y = wy;
+            }
+            InvalidateViewer(true);
+        } else if (g_app.is_panning) {
+            g_app.state.pan_x += (mx - g_app.last_mouse.x);
+            g_app.state.pan_y += (my - g_app.last_mouse.y);
+            g_app.last_mouse.x = mx; g_app.last_mouse.y = my;
+            InvalidateViewer(false);
+        }
+        return 0;
     }
-    return 0;
-        
+    case WM_LBUTTONUP:
+        if (g_app.drag_mode != DRAG_NONE) {
+            g_app.drag_mode = DRAG_NONE;
+            ReleaseCapture();
+            InvalidateViewer(true);
+        } else if (g_app.is_panning) {
+            g_app.is_panning = false;
+            ReleaseCapture();
+            InvalidateViewer(true);
+        }
+        return 0;
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         g_app.state.zoom *= (delta > 0) ? 1.15 : 0.85;
@@ -1492,12 +1623,16 @@ case WM_LBUTTONUP:
 }
 
 // -------------------------------------------------------------
-// WinMain & Accelerator Table (Keyboard Shortcuts)
+// WinMain Entry Point & Keyboard Accelerators
 // -------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     InitializeCriticalSection(&g_app.cs);
-    g_app.state.zoom = 1.0; g_app.state.export_dpi = 300; g_app.state.paper_size = PAPER_A4;
-    g_app.cache_dirty = true; g_app.pipe_enabled = 1; g_app.rpc_running = 1;
+    g_app.state.zoom = 1.0;
+    g_app.state.export_dpi = 300;
+    g_app.state.paper_size = PAPER_A4;
+    g_app.cache_dirty = true;
+    g_app.pipe_enabled = 1;
+    g_app.rpc_running = 1;
     g_app.selected_annot_idx = -1;
     wcsncpy_s(g_app.pipe_name, MAX_PATH, DEFAULT_PIPE_NAME, _TRUNCATE);
 
@@ -1515,10 +1650,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     LocalFree(argv);
 
     WNDCLASSEXW wc = { sizeof(WNDCLASSEXW) };
-    wc.lpfnWndProc = WndProc; wc.hInstance = hInstance;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
     wc.lpszClassName = L"SvgViewerFullStandAlone";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.style = CS_DBLCLKS; // Enable double clicks
+    wc.style = CS_DBLCLKS;
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"Pure CPU SVG Viewer & Annotator",
@@ -1529,7 +1665,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
 
-    // Build Keyboard Shortcuts Table
+    // Keyboard Shortcuts Table
     ACCEL accels[] = {
         { FCONTROL, 'O', IDM_FILE_OPEN },
         { FVIRTKEY, 'R', IDM_VIEW_ROTATE_CW },
