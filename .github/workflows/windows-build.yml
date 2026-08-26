@@ -25,10 +25,12 @@ jobs:
             cmake_arch: x64
             can_run_tests: true
             runner: windows-latest
+            triplet: x64-windows
           - arch: arm64
             cmake_arch: ARM64
             can_run_tests: true
             runner: windows-11-arm
+            triplet: arm64-windows
 
     steps:
     - name: Checkout Repository
@@ -80,7 +82,7 @@ jobs:
       run: |
         cmake -B build -S .   -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake `
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }}
         
     - name: Build Project
       continue-on-error: false
