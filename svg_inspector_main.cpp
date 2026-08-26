@@ -123,7 +123,19 @@ typedef struct {
     char command[64];
 } ContextMenuEvent;
 
-typedef enum { ANNOT_POINT_TEXT = 0, ANNOT_RECT_TEXT, ANNOT_POLYGON, ANNOT_ARROW } AnnotType;
+typedef enum {
+    ANNOT_POINT = 0,
+    ANNOT_RECT,
+    ANNOT_POLYGON
+} AnnotType;
+
+typedef enum {
+    DRAG_NONE = 0,
+    DRAG_BODY,           // Reposition whole annotation
+    DRAG_RECT_RESIZE,    // Resize Rect (bottom-right handle)
+    DRAG_POLY_VERTEX,    // Move individual polygon vertex
+    DRAG_CALLOUT         // Move callout arrow tip & text box
+} DragMode;
 
 typedef struct { double x, y; } Point2D;
 
@@ -131,10 +143,15 @@ typedef struct {
     char id[64];
     AnnotType type;
     char text[256];
-    double x, y, w, h;
-    double arrow_tip_x, arrow_tip_y;
-    Point2D poly_points[32];
+    double x, y;             // Position (Point pos, Rect top-left, or Polygon origin)
+    double w, h;             // Dimensions for Rect
+    Point2D poly_points[32]; // Vertices for Polygon
     int num_points;
+
+    // Optional Callout attached to any annotation
+    bool has_callout;
+    double callout_x, callout_y;
+    char callout_text[256];
 } Annotation;
 
 #pragma pack(push, 1)
@@ -160,8 +177,10 @@ typedef struct {
     Annotation annotations[MAX_ANNOTATIONS];
     int num_annotations;
     int selected_annot_idx;
-    bool is_dragging_annot;
-    bool is_dragging_arrow_tip;
+
+DragMode drag_mode;
+int active_vertex_idx;
+double drag_offset_x, drag_offset_y;
 
     HitTestArea hit_areas[MAX_HITTESTS];
     int num_hit_areas;
@@ -393,75 +412,74 @@ void RenderVectorCanvas(cairo_t* cr, double target_w, double target_h, double px
         cairo_save(cr);
         cairo_select_font_face(cr, "Segoe UI", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
         cairo_set_font_size(cr, 13.0);
-
-        if (a->type == ANNOT_POINT_TEXT) {
+    
+        double anchor_x = a->x, anchor_y = a->y;
+    
+        if (a->type == ANNOT_POINT) {
             cairo_set_source_rgba(cr, 0.9, 0.15, 0.15, 1.0);
             cairo_arc(cr, a->x, a->y, 5.0, 0, 2 * M_PI);
             cairo_fill(cr);
-            cairo_move_to(cr, a->x + 8.0, a->y + 4.0);
-            cairo_show_text(cr, a->text);
-        } else if (a->type == ANNOT_RECT_TEXT) {
-            cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.2);
+            if (a->text[0]) {
+                cairo_move_to(cr, a->x + 8.0, a->y + 4.0);
+                cairo_show_text(cr, a->text);
+            }
+        } else if (a->type == ANNOT_RECT) {
+            cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.25);
             cairo_rectangle(cr, a->x, a->y, a->w, a->h);
             cairo_fill_preserve(cr);
             cairo_set_source_rgba(cr, 0.2, 0.5, 0.9, 0.9);
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
-            cairo_move_to(cr, a->x + 6.0, a->y + 16.0);
-            cairo_show_text(cr, a->text);
+            if (a->text[0]) {
+                cairo_move_to(cr, a->x + 6.0, a->y + 16.0);
+                cairo_show_text(cr, a->text);
+            }
+            anchor_x = a->x + a->w / 2.0;
+            anchor_y = a->y + a->h / 2.0;
         } else if (a->type == ANNOT_POLYGON && a->num_points >= 3) {
-            cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.2);
-            cairo_move_to(cr, a->poly_points[0].x, a->poly_points[0].y);
+            cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.25);
+            cairo_move_to(cr, a->x + a->poly_points[0].x, a->y + a->poly_points[0].y);
             for (int p = 1; p < a->num_points; ++p) {
-                cairo_line_to(cr, a->poly_points[p].x, a->poly_points[p].y);
+                cairo_line_to(cr, a->x + a->poly_points[p].x, a->y + a->poly_points[p].y);
             }
             cairo_close_path(cr);
             cairo_fill_preserve(cr);
             cairo_set_source_rgba(cr, 0.15, 0.75, 0.35, 0.9);
             cairo_set_line_width(cr, 1.5);
             cairo_stroke(cr);
-            cairo_move_to(cr, a->poly_points[0].x + 6.0, a->poly_points[0].y + 16.0);
-            cairo_show_text(cr, a->text);
-        } else if (a->type == ANNOT_ARROW) {
-            cairo_set_source_rgba(cr, 0.8, 0.2, 0.8, 0.9);
-            cairo_set_line_width(cr, 2.0);
-            // Draw arrow line
-            cairo_move_to(cr, a->x, a->y);
-            cairo_line_to(cr, a->arrow_tip_x, a->arrow_tip_y);
-            cairo_stroke(cr);
-            // Draw head
-            double angle = atan2(a->arrow_tip_y - a->y, a->arrow_tip_x - a->x);
-            cairo_save(cr);
-            cairo_translate(cr, a->arrow_tip_x, a->arrow_tip_y);
-            cairo_rotate(cr, angle);
-            cairo_move_to(cr, 0, 0);
-            cairo_line_to(cr, -12.0, -6.0);
-            cairo_line_to(cr, -12.0, 6.0);
-            cairo_close_path(cr);
-            cairo_fill(cr);
-            cairo_restore(cr);
-
-            cairo_move_to(cr, a->x - 10.0, a->y - 8.0);
-            cairo_show_text(cr, a->text);
         }
-
-        // Selection Highlight
-        if (i == g_app.selected_annot_idx) {
-            cairo_set_source_rgba(cr, 1.0, 0.6, 0.0, 0.9);
+    
+        // Render Optional Callout
+        if (a->has_callout) {
+            cairo_set_source_rgba(cr, 0.8, 0.2, 0.8, 0.9);
             cairo_set_line_width(cr, 1.5);
-            double dash[] = { 4.0, 4.0 };
-            cairo_set_dash(cr, dash, 2, 0);
-            cairo_rectangle(cr, a->x - 6.0, a->y - 6.0, (a->w > 0 ? a->w : 80) + 12.0, (a->h > 0 ? a->h : 25) + 12.0);
-            cairo_stroke(cr);
-
-            if (a->type == ANNOT_ARROW) {
-                cairo_arc(cr, a->arrow_tip_x, a->arrow_tip_y, 6.0, 0, 2 * M_PI);
+            DrawArrow(cr, anchor_x, anchor_y, a->callout_x, a->callout_y);
+            cairo_move_to(cr, a->callout_x + 6.0, a->callout_y + 4.0);
+            cairo_show_text(cr, a->callout_text[0] ? a->callout_text : "Callout");
+        }
+    
+        // Selection & Manipulation Handles
+        if (i == g_app.selected_annot_idx) {
+            cairo_set_source_rgba(cr, 1.0, 0.5, 0.0, 1.0);
+            if (a->type == ANNOT_RECT) {
+                // Draw Resize Handle
+                cairo_rectangle(cr, a->x + a->w - 4.0, a->y + a->h - 4.0, 8.0, 8.0);
+                cairo_fill(cr);
+            } else if (a->type == ANNOT_POLYGON) {
+                // Draw Vertex Handles
+                for (int p = 0; p < a->num_points; ++p) {
+                    cairo_rectangle(cr, a->x + a->poly_points[p].x - 4.0, a->y + a->poly_points[p].y - 4.0, 8.0, 8.0);
+                    cairo_fill(cr);
+                }
+            }
+            if (a->has_callout) {
+                cairo_arc(cr, a->callout_x, a->callout_y, 4.0, 0, 2 * M_PI);
                 cairo_fill(cr);
             }
         }
-
         cairo_restore(cr);
     }
+   
 
     cairo_restore(cr);
     cairo_restore(cr);
@@ -595,23 +613,57 @@ void InvalidateViewer(bool force_dirty) {
     if (g_app.hwnd) RedrawWindow(g_app.hwnd, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
-int HitTestAnnotations(double wx, double wy, bool* out_hit_arrow_tip) {
-    *out_hit_arrow_tip = false;
+int HitTestAnnotations(double wx, double wy, DragMode* out_mode, int* out_vertex_idx) {
+    *out_mode = DRAG_NONE;
+    *out_vertex_idx = -1;
+    const double HANDLE_R = 8.0;
+
     for (int i = g_app.num_annotations - 1; i >= 0; --i) {
         Annotation* a = &g_app.annotations[i];
-        if (a->type == ANNOT_ARROW) {
-            double dx = wx - a->arrow_tip_x;
-            double dy = wy - a->arrow_tip_y;
-            if (sqrt(dx * dx + dy * dy) <= 12.0) {
-                *out_hit_arrow_tip = true;
+
+        // 1. Check Callout Tip Handle
+        if (a->has_callout) {
+            double dx = wx - a->callout_x, dy = wy - a->callout_y;
+            if (sqrt(dx * dx + dy * dy) <= HANDLE_R) {
+                *out_mode = DRAG_CALLOUT;
                 return i;
             }
         }
-        double box_w = a->w > 0 ? a->w : 80;
-        double box_h = a->h > 0 ? a->h : 25;
-        if (wx >= (a->x - 6.0) && wx <= (a->x + box_w + 6.0) &&
-            wy >= (a->y - 6.0) && wy <= (a->y + box_h + 6.0)) {
-            return i;
+
+        // 2. Type-Specific Handles & Body
+        if (a->type == ANNOT_RECT) {
+            // Check Bottom-Right Resize Handle
+            double hx = a->x + a->w, hy = a->y + a->h;
+            if (sqrt((wx - hx) * (wx - hx) + (wy - hy) * (wy - hy)) <= HANDLE_R) {
+                *out_mode = DRAG_RECT_RESIZE;
+                return i;
+            }
+            // Check Rect Body
+            if (wx >= a->x && wx <= (a->x + a->w) && wy >= a->y && wy <= (a->y + a->h)) {
+                *out_mode = DRAG_BODY;
+                return i;
+            }
+        } else if (a->type == ANNOT_POLYGON) {
+            // Check Individual Vertices
+            for (int p = 0; p < a->num_points; ++p) {
+                double vx = a->x + a->poly_points[p].x;
+                double vy = a->y + a->poly_points[p].y;
+                if (sqrt((wx - vx) * (wx - vx) + (wy - vy) * (wy - vy)) <= HANDLE_R) {
+                    *out_mode = DRAG_POLY_VERTEX;
+                    *out_vertex_idx = p;
+                    return i;
+                }
+            }
+            // Check Bounding Area
+            if (fabs(wx - a->x) < 30.0 && fabs(wy - a->y) < 30.0) {
+                *out_mode = DRAG_BODY;
+                return i;
+            }
+        } else if (a->type == ANNOT_POINT) {
+            if (sqrt((wx - a->x) * (wx - a->x) + (wy - a->y) * (wy - a->y)) <= 10.0) {
+                *out_mode = DRAG_BODY;
+                return i;
+            }
         }
     }
     return -1;
@@ -983,34 +1035,132 @@ void ExecuteRPC(const char* raw_json, char* response, size_t max_resp) {
         } else {
             snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"missing pipe_name\"}\n");
         }
-    } else if (strcmp(cmd_name, "update_annotation") == 0) {
-        const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
-        bool found = false;
-        if (id) {
-            for (int i = 0; i < g_app.num_annotations; ++i) {
-                if (strcmp(g_app.annotations[i].id, id) == 0) {
-                    Annotation* a = &g_app.annotations[i];
-                    cJSON* text = cJSON_GetObjectItem(root, "text");
-                    cJSON* x = cJSON_GetObjectItem(root, "x");
-                    cJSON* y = cJSON_GetObjectItem(root, "y");
-                    cJSON* ax = cJSON_GetObjectItem(root, "arrow_tip_x");
-                    cJSON* ay = cJSON_GetObjectItem(root, "arrow_tip_y");
+    } 
 
-                    if (text) strncpy_s(a->text, sizeof(a->text), text->valuestring, _TRUNCATE);
-                    if (x) a->x = x->valuedouble;
-                    if (y) a->y = y->valuedouble;
-                    if (ax) a->arrow_tip_x = ax->valuedouble;
-                    if (ay) a->arrow_tip_y = ay->valuedouble;
+    else if (strcmp(cmd_name, "add_annotation") == 0) {
+    if (g_app.num_annotations < MAX_ANNOTATIONS) {
+        Annotation* a = &g_app.annotations[g_app.num_annotations++];
+        memset(a, 0, sizeof(Annotation));
 
-                    found = true;
-                    InvalidateViewer(true);
-                    snprintf(response, max_resp, "{\"status\":\"ok\",\"id\":\"%s\"}\n", id);
-                    break;
+        const char* uid = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+        const char* type_str = cJSON_GetStringValue(cJSON_GetObjectItem(root, "type"));
+        const char* text = cJSON_GetStringValue(cJSON_GetObjectItem(root, "text"));
+
+        if (uid) strncpy_s(a->id, sizeof(a->id), uid, _TRUNCATE);
+        if (text) strncpy_s(a->text, sizeof(a->text), text, _TRUNCATE);
+
+        a->x = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "x"));
+        a->y = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "y"));
+        a->w = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "w"));
+        a->h = cJSON_GetNumberValue(cJSON_GetObjectItem(root, "h"));
+
+        if (type_str && strcmp(type_str, "rect") == 0) {
+            a->type = ANNOT_RECT;
+            if (a->w <= 0) a->w = 100;
+            if (a->h <= 0) a->h = 50;
+        } else if (type_str && strcmp(type_str, "polygon") == 0) {
+            a->type = ANNOT_POLYGON;
+            cJSON* pts = cJSON_GetObjectItem(root, "points");
+            if (cJSON_IsArray(pts)) {
+                cJSON* p = NULL;
+                a->num_points = 0;
+                cJSON_ArrayForEach(p, pts) {
+                    if (a->num_points < 32 && cJSON_IsArray(p) && cJSON_GetArraySize(p) >= 2) {
+                        a->poly_points[a->num_points].x = cJSON_GetArrayItem(p, 0)->valuedouble;
+                        a->poly_points[a->num_points].y = cJSON_GetArrayItem(p, 1)->valuedouble;
+                        a->num_points++;
+                    }
                 }
             }
+        } else {
+            a->type = ANNOT_POINT;
         }
-        if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"annotation not found\"}\n");
-    } else if (strcmp(cmd_name, "get_viewport") == 0) {
+
+        // Optional Callout Config
+        cJSON* callout = cJSON_GetObjectItem(root, "callout");
+        if (cJSON_IsObject(callout)) {
+            a->has_callout = true;
+            a->callout_x = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "x"));
+            a->callout_y = cJSON_GetNumberValue(cJSON_GetObjectItem(callout, "y"));
+            const char* ctext = cJSON_GetStringValue(cJSON_GetObjectItem(callout, "text"));
+            if (ctext) strncpy_s(a->callout_text, sizeof(a->callout_text), ctext, _TRUNCATE);
+        }
+
+        InvalidateViewer(true);
+        snprintf(response, max_resp, "{\"status\":\"ok\",\"annot_id\":\"%s\"}\n", a->id);
+    }
+}
+// 2. UPDATE ANNOTATION
+else if (strcmp(cmd_name, "update_annotation") == 0) {
+    const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+    bool found = false;
+    for (int i = 0; i < g_app.num_annotations; ++i) {
+        if (id && strcmp(g_app.annotations[i].id, id) == 0) {
+            Annotation* a = &g_app.annotations[i];
+            cJSON* text = cJSON_GetObjectItem(root, "text");
+            cJSON* x = cJSON_GetObjectItem(root, "x");
+            cJSON* y = cJSON_GetObjectItem(root, "y");
+            cJSON* w = cJSON_GetObjectItem(root, "w");
+            cJSON* h = cJSON_GetObjectItem(root, "h");
+
+            if (text) strncpy_s(a->text, sizeof(a->text), text->valuestring, _TRUNCATE);
+            if (x) a->x = x->valuedouble;
+            if (y) a->y = y->valuedouble;
+            if (w) a->w = w->valuedouble;
+            if (h) a->h = h->valuedouble;
+
+            // Vertex Editing for Polygon
+            cJSON* v_idx = cJSON_GetObjectItem(root, "vertex_index");
+            cJSON* vx = cJSON_GetObjectItem(root, "vertex_x");
+            cJSON* vy = cJSON_GetObjectItem(root, "vertex_y");
+            if (a->type == ANNOT_POLYGON && v_idx && vx && vy) {
+                int idx = (int)v_idx->valuedouble;
+                if (idx >= 0 && idx < a->num_points) {
+                    a->poly_points[idx].x = vx->valuedouble;
+                    a->poly_points[idx].y = vy->valuedouble;
+                }
+            }
+
+            // Callout Update
+            cJSON* callout = cJSON_GetObjectItem(root, "callout");
+            if (cJSON_IsObject(callout)) {
+                a->has_callout = true;
+                cJSON* cx = cJSON_GetObjectItem(callout, "x");
+                cJSON* cy = cJSON_GetObjectItem(callout, "y");
+                cJSON* ct = cJSON_GetObjectItem(callout, "text");
+                if (cx) a->callout_x = cx->valuedouble;
+                if (cy) a->callout_y = cy->valuedouble;
+                if (ct) strncpy_s(a->callout_text, sizeof(a->callout_text), ct->valuestring, _TRUNCATE);
+            }
+            found = true;
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"id\":\"%s\"}\n", id);
+            break;
+        }
+    }
+    if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"not found\"}\n");
+}
+// 3. DELETE ANNOTATION
+else if (strcmp(cmd_name, "delete_annotation") == 0) {
+    const char* id = cJSON_GetStringValue(cJSON_GetObjectItem(root, "id"));
+    bool found = false;
+    for (int i = 0; i < g_app.num_annotations; ++i) {
+        if (id && strcmp(g_app.annotations[i].id, id) == 0) {
+            for (int j = i; j < g_app.num_annotations - 1; ++j) {
+                g_app.annotations[j] = g_app.annotations[j + 1];
+            }
+            g_app.num_annotations--;
+            g_app.selected_annot_idx = -1;
+            found = true;
+            InvalidateViewer(true);
+            snprintf(response, max_resp, "{\"status\":\"ok\",\"deleted\":\"%s\"}\n", id);
+            break;
+        }
+    }
+    if (!found) snprintf(response, max_resp, "{\"status\":\"error\",\"message\":\"not found\"}\n");
+}
+    
+    else if (strcmp(cmd_name, "get_viewport") == 0) {
         const char* paper_str = "A4";
         if (g_app.state.paper_size == PAPER_A3) paper_str = "A3";
         else if (g_app.state.paper_size == PAPER_LETTER) paper_str = "Letter";
@@ -1254,58 +1404,77 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         return 0;
     }
-    case WM_LBUTTONDOWN: {
-        double wx = 0, wy = 0;
-        ScreenToWorld(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &wx, &wy);
-        bool hit_arrow = false;
-        int idx = HitTestAnnotations(wx, wy, &hit_arrow);
+        
+case WM_LBUTTONDOWN: {
+    double wx = 0, wy = 0;
+    ScreenToWorld(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam), &wx, &wy);
+    DragMode mode = DRAG_NONE;
+    int v_idx = -1;
+    int idx = HitTestAnnotations(wx, wy, &mode, &v_idx);
 
-        if (idx >= 0) {
-            g_app.selected_annot_idx = idx;
-            g_app.is_dragging_annot = true;
-            g_app.is_dragging_arrow_tip = hit_arrow;
-            SetCapture(hwnd);
-            InvalidateViewer(true);
-        } else {
-            g_app.selected_annot_idx = -1;
-            g_app.is_panning = true;
-            g_app.last_mouse.x = GET_X_LPARAM(lParam);
-            g_app.last_mouse.y = GET_Y_LPARAM(lParam);
-            SetCapture(hwnd);
-            InvalidateViewer(true);
-        }
-        return 0;
+    if (idx >= 0) {
+        g_app.selected_annot_idx = idx;
+        g_app.drag_mode = mode;
+        g_app.active_vertex_idx = v_idx;
+        g_app.drag_offset_x = wx - g_app.annotations[idx].x;
+        g_app.drag_offset_y = wy - g_app.annotations[idx].y;
+        SetCapture(hwnd);
+        InvalidateViewer(true);
+    } else {
+        g_app.selected_annot_idx = -1;
+        g_app.drag_mode = DRAG_NONE;
+        g_app.is_panning = true;
+        g_app.last_mouse.x = GET_X_LPARAM(lParam);
+        g_app.last_mouse.y = GET_Y_LPARAM(lParam);
+        SetCapture(hwnd);
+        InvalidateViewer(true);
     }
-    case WM_MOUSEMOVE: {
-        int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
-        if (g_app.is_dragging_annot && g_app.selected_annot_idx >= 0) {
-            double wx = 0, wy = 0; ScreenToWorld(mx, my, &wx, &wy);
-            Annotation* a = &g_app.annotations[g_app.selected_annot_idx];
-            if (g_app.is_dragging_arrow_tip) {
-                a->arrow_tip_x = wx; a->arrow_tip_y = wy;
-            } else {
-                a->x = wx; a->y = wy;
-            }
-            InvalidateViewer(true);
-        } else if (g_app.is_panning) {
-            g_app.state.pan_x += (mx - g_app.last_mouse.x);
-            g_app.state.pan_y += (my - g_app.last_mouse.y);
-            g_app.last_mouse.x = mx; g_app.last_mouse.y = my;
-            InvalidateViewer(false);
+    return 0;
+}
+
+case WM_MOUSEMOVE: {
+    int mx = GET_X_LPARAM(lParam), my = GET_Y_LPARAM(lParam);
+    if (g_app.drag_mode != DRAG_NONE && g_app.selected_annot_idx >= 0) {
+        double wx = 0, wy = 0;
+        ScreenToWorld(mx, my, &wx, &wy);
+        Annotation* a = &g_app.annotations[g_app.selected_annot_idx];
+
+        if (g_app.drag_mode == DRAG_BODY) {
+            a->x = wx - g_app.drag_offset_x;
+            a->y = wy - g_app.drag_offset_y;
+        } else if (g_app.drag_mode == DRAG_RECT_RESIZE && a->type == ANNOT_RECT) {
+            a->w = (wx - a->x) > 10.0 ? (wx - a->x) : 10.0;
+            a->h = (wy - a->y) > 10.0 ? (wy - a->y) : 10.0;
+        } else if (g_app.drag_mode == DRAG_POLY_VERTEX && a->type == ANNOT_POLYGON && g_app.active_vertex_idx >= 0) {
+            a->poly_points[g_app.active_vertex_idx].x = wx - a->x;
+            a->poly_points[g_app.active_vertex_idx].y = wy - a->y;
+        } else if (g_app.drag_mode == DRAG_CALLOUT) {
+            a->callout_x = wx;
+            a->callout_y = wy;
         }
-        return 0;
+        InvalidateViewer(true);
+    } else if (g_app.is_panning) {
+        g_app.state.pan_x += (mx - g_app.last_mouse.x);
+        g_app.state.pan_y += (my - g_app.last_mouse.y);
+        g_app.last_mouse.x = mx;
+        g_app.last_mouse.y = my;
+        InvalidateViewer(false);
     }
-    case WM_LBUTTONUP:
-        if (g_app.is_dragging_annot) {
-            g_app.is_dragging_annot = false;
-            ReleaseCapture();
-            InvalidateViewer(true);
-        } else if (g_app.is_panning) {
-            g_app.is_panning = false;
-            ReleaseCapture();
-            InvalidateViewer(true);
-        }
-        return 0;
+    return 0;
+}
+
+case WM_LBUTTONUP:
+    if (g_app.drag_mode != DRAG_NONE) {
+        g_app.drag_mode = DRAG_NONE;
+        ReleaseCapture();
+        InvalidateViewer(true);
+    } else if (g_app.is_panning) {
+        g_app.is_panning = false;
+        ReleaseCapture();
+        InvalidateViewer(true);
+    }
+    return 0;
+        
     case WM_MOUSEWHEEL: {
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         g_app.state.zoom *= (delta > 0) ? 1.15 : 0.85;
