@@ -186,7 +186,22 @@ static AppState g_app;
 
 // Forward declarations
 void InvalidateViewer(bool force_dirty);
-void ScreenToWorld(double sx, double sy, double* wx, double* wy);
+void ScreenToWorld(double sx, double sy, double* wx, double* wy) {
+    // 1. Center of viewport with pan offset
+    double cx = (g_app.backbuffer_w / 2.0) + g_app.state.pan_x;
+    double cy = (g_app.backbuffer_h / 2.0) + g_app.state.pan_y;
+    double dx = sx - cx;
+    double dy = sy - cy;
+
+    // 2. Inverse rotation (-theta)
+    double rad = -g_app.state.rotation_deg * M_PI / 180.0;
+    double rx = dx * cos(rad) - dy * sin(rad);
+    double ry = dx * sin(rad) + dy * cos(rad);
+
+    // 3. Inverse scale (zoom)
+    *wx = rx / g_app.state.zoom;
+    *wy = ry / g_app.state.zoom;
+}
 bool SaveAnnotationsJSON(const char* filepath);
 bool LoadAnnotationsJSON(const char* filepath);
 
