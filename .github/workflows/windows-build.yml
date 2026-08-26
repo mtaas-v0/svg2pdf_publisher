@@ -77,5 +77,5 @@ jobs:
       uses: actions/upload-artifact@v4
       continue-on-error: false
       with:
-        name: svg2pdf_publisher-windows-x64-r${{ github.run_number }}
-        path: build/
+        name: svg2pdf_publisher-Release-windows-x64-r${{ github.run_number }}
+        path: build/Release
