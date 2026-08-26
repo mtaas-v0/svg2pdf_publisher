@@ -1011,9 +1011,9 @@ void HandleContextMenu(HWND hwnd, int mx, int my) {
             } else {
                 a->type = ANNOT_POLYGON;
                 a->num_points = 3;
-                a->poly_points[0] = (Point2D){ 0, -40 };
-                a->poly_points[1] = (Point2D){ 40, 40 };
-                a->poly_points[2] = (Point2D){ -40, 40 };
+                a->poly_points[0] = Point2D{ 0, -40 };
+                a->poly_points[1] = Point2D{ 40, 40 };
+                a->poly_points[2] = Point2D{ -40, 40 };
                 strncpy_s(a->text, sizeof(a->text), "Polygon Area", _TRUNCATE);
             }
             g_app.selected_annot_idx = g_app.num_annotations - 1;
