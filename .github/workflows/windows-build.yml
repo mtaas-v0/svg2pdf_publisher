@@ -12,8 +12,23 @@ on:
   # VCPKG_ROOT: ${{ github.workspace }}\vcpkg
   
 jobs:
-  build-windows:
-    runs-on: windows-2022
+
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }} 
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+            can_run_tests: true
+            runner: windows-latest
+          - arch: arm64
+            cmake_arch: ARM64
+            can_run_tests: true
+            runner: windows-11-arm
 
     steps:
     - name: Checkout Repository
@@ -24,7 +39,6 @@ jobs:
         choco install  gperf #pkgconfiglite
       shell: powershell
 
-        
     - name: mkdir build/
       run: |
         cd ${{ github.workspace }}
@@ -77,5 +91,5 @@ jobs:
       uses: actions/upload-artifact@v4
       continue-on-error: false
       with:
-        name: svg2pdf_publisher-Release-windows-x64-r${{ github.run_number }}
+        name: svg2pdf_publisher-Release-${{ runner.os }}-r${{ github.run_number }}
         path: build/Release
