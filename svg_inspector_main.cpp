@@ -14,6 +14,7 @@
 #include <cairo.h>
 #include <cairo-pdf.h>
 #include <cairo-svg.h>
+#include <cairo-win32.h>
 #include <librsvg/rsvg.h>
 #include <cjson/cJSON.h>
 
@@ -106,6 +107,7 @@ typedef struct {
     double x, y;
     double scale;
     double rotation_deg;
+    double intrinsic_w, intrinsic_h;
 } SvgLayer;
 
 typedef struct {
